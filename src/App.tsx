@@ -629,8 +629,11 @@ export default function App() {
       setIsAuthModalOpen(false);
     } catch (err: any) {
       console.error("Erro no Login com Google", err);
-      // Omitir erros comuns de cancelamento
-      if (err.code !== "auth/popup-closed-by-user" && err.code !== "auth/cancelled-popup-request") {
+      if (err.code === "auth/popup-closed-by-user") {
+        setAuthFeedback("A janela de login do Google fechou sozinha ou foi bloqueada. Use e-mail/senha na aba acima 'CRIAR CONTA' para acessar rapidamente!");
+      } else if (err.code === "auth/popup-blocked") {
+        setAuthFeedback("O navegador bloqueou a janela popup do Google. Use e-mail/senha na aba acima 'CRIAR CONTA' para entrar facilmente!");
+      } else if (err.code !== "auth/cancelled-popup-request") {
         setAuthFeedback(`Não conseguimos conectar com o Google: ${err.message || err}`);
       }
     }
@@ -647,7 +650,8 @@ export default function App() {
 
   // --- CONTROLE DE COMENTÁRIOS COM PERSISTÊNCIA ---
   const handleSaveComment = async (recipeId: string) => {
-    if (!newCommentText.trim()) {
+    const commentTextToSave = newCommentText.trim();
+    if (!commentTextToSave) {
       return;
     }
 
@@ -668,7 +672,7 @@ export default function App() {
     const newCommentObj: RecipeComment = {
       id: commentId,
       author: commenterName,
-      text: newCommentText.trim(),
+      text: commentTextToSave,
       timestamp: timestampStr,
       userEmail: currentUser ? currentUser.email : "Visitante (Sem Conta)",
       recipeId
@@ -706,7 +710,7 @@ export default function App() {
         id: commentId,
         recipeId,
         author: commenterName,
-        text: newCommentText.trim(),
+        text: commentTextToSave,
         timestamp: timestampStr,
         userEmail: currentUser ? currentUser.email : "Visitante (Sem Conta)",
         createdAt: serverTimestamp()
