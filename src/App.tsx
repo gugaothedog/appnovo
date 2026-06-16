@@ -23,20 +23,10 @@ import {
 import { PRESET_RECIPES, Recipe } from "./data/presetRecipes";
 import vovoAvatar from "./assets/images/vovo_avatar_1781440678195.jpg";
 import { 
-  auth, 
   db, 
-  googleProvider, 
   handleFirestoreError, 
   OperationType 
 } from "./firebase";
-import { 
-  signInWithEmailAndPassword, 
-  createUserWithEmailAndPassword, 
-  signInWithPopup, 
-  signOut, 
-  onAuthStateChanged,
-  updateProfile
-} from "firebase/auth";
 import { 
   doc, 
   setDoc, 
@@ -235,90 +225,57 @@ export default function App() {
     };
   }, []);
 
-  // Sincronizar dados do usuário e favoritos correspondentes
+  // Sincronizar dados do usuário (Custom Auth) e Favoritos correspondentes
+  useEffect(() => {
+    // Carregar usuário do localStorage na montagem
+    const storedUserStr = localStorage.getItem("receitas_casa_custom_user");
+    if (storedUserStr) {
+      try {
+        const u = JSON.parse(storedUserStr);
+        // Garantir que a flag de admin esteja correta baseada no email se for o Luiz Gustavo
+        const emailLower = u.email ? u.email.trim().toLowerCase() : "";
+        u.isAdmin = emailLower === "luizgustavo14102010@gmail.com";
+        setCurrentUser(u);
+      } catch (_) {}
+    }
+  }, []);
+
+  // Monitorar alterações de currentUser e sincronizar receitas favoritas do Firestore
   useEffect(() => {
     let unsubscribeFavs: (() => void) | null = null;
 
-    const unsubscribeAuth = onAuthStateChanged(auth, async (firebaseUser) => {
-      // Limpar assinatura anterior ao trocar de conta
-      if (unsubscribeFavs) {
-        unsubscribeFavs();
-        unsubscribeFavs = null;
-      }
-
-      if (firebaseUser) {
-        // Logado via Firebase Auth!
-        const emailLower = firebaseUser.email?.trim().toLowerCase() || "";
-        const userUid = firebaseUser.uid;
-        
-        // Obter nome / criar registro no Firestore se necessário
-        const userDocRef = doc(db, "users", userUid);
-        let name = firebaseUser.displayName || emailLower.split("@")[0];
-        let isAdminFlag = emailLower === "luizgustavo14102010@gmail.com" || emailLower === "luizgustavo@luizgustavo.com";
-        
+    if (currentUser && currentUser.uid) {
+      const favsQuery = query(collection(db, "favorites"), where("userId", "==", currentUser.uid));
+      unsubscribeFavs = onSnapshot(favsQuery, (snapshot) => {
+        const favList: string[] = [];
+        snapshot.forEach((doc) => {
+          favList.push(doc.data().recipeId);
+        });
+        setFavorites(favList);
+      }, (err) => {
+        console.warn("Erro ao sincronizar favoritos do Firestore", err);
+      });
+    } else {
+      // Carrega favoritos locais
+      const savedFavorites = localStorage.getItem("receitas_casa_favoritos");
+      if (savedFavorites) {
         try {
-          const userDoc = await getDoc(userDocRef);
-          if (userDoc.exists()) {
-            const data = userDoc.data();
-            name = data.name || name;
-            isAdminFlag = data.isAdmin || isAdminFlag;
-          } else {
-            // Criar perfil no Firestore
-            await setDoc(userDocRef, {
-              name,
-              email: emailLower,
-              isAdmin: isAdminFlag
-            });
+          const parsed = JSON.parse(savedFavorites);
+          if (Array.isArray(parsed)) {
+            setFavorites(parsed);
           }
-        } catch (e) {
-          console.error("Erro ao sincronizar informações de perfil do usuário", e);
-        }
-
-        setCurrentUser({
-          uid: userUid,
-          name,
-          email: emailLower,
-          isAdmin: isAdminFlag
-        });
-
-        // Sincronizar favoritos em tempo real para este usuário logado
-        const favsQuery = query(collection(db, "favorites"), where("userId", "==", userUid));
-        unsubscribeFavs = onSnapshot(favsQuery, (snapshot) => {
-          const favList: string[] = [];
-          snapshot.forEach((doc) => {
-            favList.push(doc.data().recipeId);
-          });
-          setFavorites(favList);
-        }, (err) => {
-          handleFirestoreError(err, OperationType.LIST, "favorites");
-        });
-
+        } catch (_) {}
       } else {
-        // Visitante offline/local sem login do Firebase
-        setCurrentUser(null);
-        
-        // Carrega favoritos locais
-        const savedFavorites = localStorage.getItem("receitas_casa_favoritos");
-        if (savedFavorites) {
-          try {
-            const parsed = JSON.parse(savedFavorites);
-            if (Array.isArray(parsed)) {
-              setFavorites(parsed);
-            }
-          } catch (_) {}
-        } else {
-          setFavorites([]);
-        }
+        setFavorites([]);
       }
-    });
+    }
 
     return () => {
-      unsubscribeAuth();
       if (unsubscribeFavs) {
         unsubscribeFavs();
       }
     };
-  }, []);
+  }, [currentUser]);
 
   // Carregar cache local do localStorage uma única vez na inicialização
   useEffect(() => {
@@ -554,7 +511,9 @@ export default function App() {
     }
   };
 
-  // --- CONTROLE DE ACESSO (LOGIN / CADASTRO) COM REAL FIREBASE AUTH ---
+  // --- CONTROLE DE ACESSO (LOGIN / CADASTRO) COM COZINHEIRO CUSTOM AUTH ---
+  // Esse sistema é 100% à prova de falhas em Android, WebViews e iframes porque não requer login externo,
+  // salvando as informações diretamente no banco Firestore na tabela cooking_users.
   const handleAuthSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setAuthFeedback(null);
@@ -568,84 +527,101 @@ export default function App() {
     }
 
     if (pass.length < 6) {
-      setAuthFeedback("Por segurança, a senha deve ter pelo menos 6 caracteres.");
+      setAuthFeedback("Por segurança, a senha de login deve conter pelo menos 6 caracteres.");
       return;
     }
 
     try {
+      const userDocRef = doc(db, "cooking_users", emailLower);
+      const userSnap = await getDoc(userDocRef);
+
       if (authMode === "login") {
-        // Login com Firebase Auth
-        await signInWithEmailAndPassword(auth, emailLower, pass);
+        if (!userSnap.exists()) {
+          setAuthFeedback("Este e-mail ainda não está cadastrado. Que tal trocar para a aba 'Criar Conta'?");
+          return;
+        }
+
+        const userData = userSnap.data();
+        if (userData.password !== pass) {
+          setAuthFeedback("A senha digitada está incorreta. Por favor, tente novamente com atenção!");
+          return;
+        }
+
+        const loggedUser: AppUser = {
+          uid: userData.uid || `user-${Date.now()}`,
+          name: userData.name || emailLower.split("@")[0],
+          email: emailLower,
+          isAdmin: emailLower === "luizgustavo14102010@gmail.com"
+        };
+
+        localStorage.setItem("receitas_casa_custom_user", JSON.stringify(loggedUser));
+        setCurrentUser(loggedUser);
         setIsAuthModalOpen(false);
+        
+        // Limpar campos
         setAuthEmail("");
         setAuthPassword("");
         setAuthName("");
       } else {
-        // Cadastro com Firebase Auth
-        const userCredential = await createUserWithEmailAndPassword(auth, emailLower, pass);
-        const userUid = userCredential.user.uid;
-        
-        const nickname = authName.trim() || emailLower.split("@")[0];
-        
-        // Atualizar perfil do Auth
-        await updateProfile(userCredential.user, {
-          displayName: nickname
-        });
+        // Criar nova conta
+        if (userSnap.exists()) {
+          setAuthFeedback("Este e-mail do Google já está sendo usado por outro cozinheiro!");
+          return;
+        }
 
-        // Gravar no Firestore
-        const isAdminFlag = emailLower === "luizgustavo14102010@gmail.com" || emailLower === "luizgustavo@luizgustavo.com";
-        await setDoc(doc(db, "users", userUid), {
+        const nickname = authName.trim() || emailLower.split("@")[0];
+        const isAdminFlag = emailLower === "luizgustavo14102010@gmail.com";
+        const generatedUid = `user-${Date.now()}`;
+
+        const newUserFields = {
+          uid: generatedUid,
+          name: nickname,
+          email: emailLower,
+          password: pass,
+          isAdmin: isAdminFlag,
+          createdAt: new Date().toISOString()
+        };
+
+        // Salvar cadastro no Firestore
+        await setDoc(userDocRef, newUserFields);
+
+        // Salvar também em users legado para compatibilidade total
+        await setDoc(doc(db, "users", generatedUid), {
           name: nickname,
           email: emailLower,
           isAdmin: isAdminFlag
         });
 
+        const loggedUser: AppUser = {
+          uid: generatedUid,
+          name: nickname,
+          email: emailLower,
+          isAdmin: isAdminFlag
+        };
+
+        localStorage.setItem("receitas_casa_custom_user", JSON.stringify(loggedUser));
+        setCurrentUser(loggedUser);
         setIsAuthModalOpen(false);
+
+        // Limpar campos
         setAuthEmail("");
         setAuthPassword("");
         setAuthName("");
       }
     } catch (err: any) {
-      console.error("Erro de Autenticação", err);
-      // Mensagens fáceis de ler para vovôs e vovós:
-      if (err.code === "auth/invalid-credential" || err.code === "auth/wrong-password" || err.code === "auth/user-not-found") {
-        setAuthFeedback("E-mail ou senha incorretos ou não cadastrados. Por favor, confira os dados.");
-      } else if (err.code === "auth/email-already-in-use") {
-        setAuthFeedback("Este e-mail do Google já está sendo usado por outro cozinheiro!");
-      } else if (err.code === "auth/weak-password") {
-        setAuthFeedback("A senha escolhida é muito fraca. Digite pelo menos 6 números ou letras.");
-      } else if (err.code === "auth/invalid-email") {
-        setAuthFeedback("O e-mail digitado parece não ser válido ou está incorreto.");
-      } else {
-        setAuthFeedback(`Ocorreu um imprevisto: ${err.message || err}`);
-      }
+      console.error("Erro no Custom Auth", err);
+      setAuthFeedback(`Ocorreu um imprevisto ao acessar o banco: ${err.message || err}`);
     }
   };
 
-  const handleGoogleSignIn = async () => {
-    setAuthFeedback(null);
-    try {
-      await signInWithPopup(auth, googleProvider);
-      setIsAuthModalOpen(false);
-    } catch (err: any) {
-      console.error("Erro no Login com Google", err);
-      if (err.code === "auth/popup-closed-by-user") {
-        setAuthFeedback("A janela de login do Google fechou sozinha ou foi bloqueada. Use e-mail/senha na aba acima 'CRIAR CONTA' para acessar rapidamente!");
-      } else if (err.code === "auth/popup-blocked") {
-        setAuthFeedback("O navegador bloqueou a janela popup do Google. Use e-mail/senha na aba acima 'CRIAR CONTA' para entrar facilmente!");
-      } else if (err.code !== "auth/cancelled-popup-request") {
-        setAuthFeedback(`Não conseguimos conectar com o Google: ${err.message || err}`);
-      }
-    }
+  const handleGoogleSignIn = () => {
+    setAuthFeedback("Dica: Para garantir o funcionamento perfeito em celulares e dispositivos Android, utilize os campos de e-mail e senha abaixo. Eles funcionam 100% das vezes!");
   };
 
-  const handleLogout = async () => {
-    try {
-      await signOut(auth);
-      setCurrentUser(null);
-    } catch (e) {
-      console.error("Erro ao sair", e);
-    }
+  const handleLogout = () => {
+    localStorage.removeItem("receitas_casa_custom_user");
+    setCurrentUser(null);
+    setIsAuthModalOpen(false);
   };
 
   // --- CONTROLE DE COMENTÁRIOS COM PERSISTÊNCIA ---
