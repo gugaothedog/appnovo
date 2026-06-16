@@ -1,0 +1,82 @@
+{
+  "entities": {
+    "User": {
+      "title": "User Profile",
+      "description": "User account information",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string" },
+        "email": { "type": "string" },
+        "isAdmin": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["name", "email"]
+    },
+    "Recipe": {
+      "title": "Recipe",
+      "description": "Recipe data created by users",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "title": { "type": "string" },
+        "category": { "type": "string" },
+        "prepTime": { "type": "string" },
+        "portions": { "type": "string" },
+        "imageUrl": { "type": "string" },
+        "isPublic": { "type": "boolean" },
+        "rating": { "type": "number" },
+        "authorId": { "type": "string" },
+        "authorName": { "type": "string" },
+        "ingredients": { "type": "array" },
+        "instructions": { "type": "array" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["title", "category", "prepTime", "portions", "authorId", "authorName", "ingredients", "instructions"]
+    },
+    "Comment": {
+      "title": "Comment",
+      "description": "Recipe comments",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "recipeId": { "type": "string" },
+        "author": { "type": "string" },
+        "text": { "type": "string" },
+        "userEmail": { "type": "string" },
+        "timestamp": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["recipeId", "author", "text"]
+    },
+    "Favorite": {
+      "title": "Favorite",
+      "description": "User favorited recipes",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "recipeId": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["userId", "recipeId"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": "User",
+      "description": "Stores user profiles"
+    },
+    "/recipes/{recipeId}": {
+      "schema": "Recipe",
+      "description": "Stores recipes"
+    },
+    "/comments/{commentId}": {
+      "schema": "Comment",
+      "description": "Stores comments for recipes"
+    },
+    "/favorites/{favoriteId}": {
+      "schema": "Favorite",
+      "description": "Stores user favorites mapping"
+    }
+  }
+}

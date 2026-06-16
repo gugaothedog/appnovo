@@ -1,0 +1,23 @@
+{
+  "short_name": "Receitas Vovó",
+  "name": "Receitas de Família - Caderno de Vovó",
+  "description": "Seu caderno de receitas particular com receitas clássicas e deliciosas da vovó, feito com todo o carinho do mundo.",
+  "icons": [
+    {
+      "src": "/app_icon.jpg",
+      "type": "image/jpeg",
+      "sizes": "192x192"
+    },
+    {
+      "src": "/app_icon.jpg",
+      "type": "image/jpeg",
+      "sizes": "512x512",
+      "purpose": "any maskable"
+    }
+  ],
+  "start_url": "/",
+  "background_color": "#FCF8F5",
+  "theme_color": "#2E1B10",
+  "display": "standalone",
+  "orientation": "portrait"
+}

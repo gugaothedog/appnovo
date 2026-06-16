@@ -1,0 +1,2091 @@
+import React, { useState, useEffect, useRef } from "react";
+import { 
+  BookOpen, 
+  Plus, 
+  Heart, 
+  ArrowLeft, 
+  Clock, 
+  Users, 
+  Check, 
+  Trash2, 
+  RotateCcw, 
+  Search,
+  BookMarked,
+  Sparkles,
+  Info,
+  ChevronRight,
+  PlusCircle,
+  FileText,
+  Star,
+  Camera,
+  Image as ImageIcon
+} from "lucide-react";
+import { PRESET_RECIPES, Recipe } from "./data/presetRecipes";
+import { 
+  auth, 
+  db, 
+  googleProvider, 
+  handleFirestoreError, 
+  OperationType 
+} from "./firebase";
+import { 
+  signInWithEmailAndPassword, 
+  createUserWithEmailAndPassword, 
+  signInWithPopup, 
+  signOut, 
+  onAuthStateChanged,
+  updateProfile
+} from "firebase/auth";
+import { 
+  doc, 
+  setDoc, 
+  getDoc, 
+  collection, 
+  onSnapshot, 
+  deleteDoc, 
+  query, 
+  where, 
+  serverTimestamp 
+} from "firebase/firestore";
+
+export interface AppUser {
+  uid?: string;
+  name: string;
+  email: string;
+  isAdmin?: boolean;
+}
+
+export interface RecipeComment {
+  id: string;
+  author: string;
+  text: string;
+  timestamp: string;
+  userEmail?: string;
+  recipeId?: string;
+}
+
+// Cores Principais do Projeto Tema Bento Grid:
+// Creme Suave (Background): bg-[#FDFBF7]
+// Cinza/Marrom Escuro (Texto Principal): text-[#3C3633]
+// Verde Sálvia/Oliva (Botão Principal/Destaques): bg-[#708238] com hover bg-[#5F702F]
+// Verde Sálvia Claro / Contrastes: bg-[#708238]/10 ou bg-[#E4EAE1]
+// Bordas Sólidas Bento Grid: border-[#3C3633] com shadow-[4px_4px_0px_0px_rgba(60,54,51,1)]
+
+export default function App() {
+  // --- ESTADOS DA APLICAÇÃO ---
+  const [activeTab, setActiveTab] = useState<"ver_receitas" | "criar_receita" | "minhas_receitas">("ver_receitas");
+  
+  // Lista de receitas combinando padrão (PRESET) e salvas no localStorage
+  const [recipes, setRecipes] = useState<Recipe[]>(PRESET_RECIPES);
+  const [favorites, setFavorites] = useState<string[]>([]);
+  
+  // Filtros e Navegação Interna
+  const [selectedCategory, setSelectedCategory] = useState<string | null>(null);
+  const [selectedRecipe, setSelectedRecipe] = useState<Recipe | null>(null);
+  const [searchQuery, setSearchQuery] = useState("");
+  
+  // Modos de Acessibilidade
+  const [fontSize, setFontSize] = useState<"grande" | "gigante" | "mega">("grande");
+
+  // Modo de visualização de receita: "tudo" (integral) ou "passo" (um passo por vez)
+  const [recipeViewMode, setRecipeViewMode] = useState<"completa" | "passo-a-passo">("completa");
+  const [currentStepIndex, setCurrentStepIndex] = useState(0);
+
+  // Lista interativa de checklist de ingredientes (salva o estado de progresso temporário)
+  const [checkedIngredients, setCheckedIngredients] = useState<{ [key: string]: boolean }>({});
+
+  // Controle de Slide do Carrossel e Posição Atual
+  const carouselRef = useRef<HTMLDivElement>(null);
+  const [activeCardIndex, setActiveCardIndex] = useState(0);
+
+  // Formulário de Criação de Receita
+  const [newTitle, setNewTitle] = useState("");
+  const [newCategory, setNewCategory] = useState("Bolos e Broas");
+  const [newPrepTime, setNewPrepTime] = useState("");
+  const [newPortions, setNewPortions] = useState("");
+  const [newIngredientsText, setNewIngredientsText] = useState("");
+  const [newInstructionsText, setNewInstructionsText] = useState("");
+  const [newImageUrl, setNewImageUrl] = useState("");
+  const [newIsPublic, setNewIsPublic] = useState(true);
+  const [newRatingSetting, setNewRatingSetting] = useState(5);
+  const [formFeedback, setFormFeedback] = useState<string | null>(null);
+
+  // --- SISTEMA DE CONTAS & COMENTÁRIOS ---
+  const [currentUser, setCurrentUser] = useState<AppUser | null>(null);
+  const [comments, setComments] = useState<{ [recipeId: string]: RecipeComment[] }>({});
+  
+  // Modal de Login/Registro
+  const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
+  const [authMode, setAuthMode] = useState<"login" | "register">("login");
+  const [authEmail, setAuthEmail] = useState("");
+  const [authPassword, setAuthPassword] = useState("");
+  const [authName, setAuthName] = useState("");
+  const [authFeedback, setAuthFeedback] = useState<string | null>(null);
+
+  // Novos comentários
+  const [newCommentText, setNewCommentText] = useState("");
+  const [tempCommenterName, setTempCommenterName] = useState("");
+
+  // Categorias preexistentes
+  const categories = [
+    { title: "Bolos e Broas", icon: "🍰", color: "bg-[#F3E6D0]" },
+    { title: "Sopas e Caldos", icon: "🍲", color: "bg-[#E6EDDF]" },
+    { title: "Almoço de Domingo", icon: "🍝", color: "bg-[#E8DCCF]" },
+    { title: "Chás e Receitas de Vó", icon: "☕", color: "bg-[#DFEBE4]" },
+    { title: "Sobremesas e Doces", icon: "🍨", color: "bg-[#F5EADF]" }
+  ];
+
+  // --- SYNC COM REAL-TIME FIREBASE ---
+  useEffect(() => {
+    const unsubscribeAuth = onAuthStateChanged(auth, async (firebaseUser) => {
+      if (firebaseUser) {
+        // Logado via Firebase Auth!
+        const emailLower = firebaseUser.email?.trim().toLowerCase() || "";
+        const userUid = firebaseUser.uid;
+        
+        // Obter nome / criar registro no Firestore se necessário
+        const userDocRef = doc(db, "users", userUid);
+        let name = firebaseUser.displayName || emailLower.split("@")[0];
+        let isAdminFlag = emailLower === "luizgustavo14102010@gmail.com" || emailLower === "luizgustavo@luizgustavo.com";
+        
+        try {
+          const userDoc = await getDoc(userDocRef);
+          if (userDoc.exists()) {
+            const data = userDoc.data();
+            name = data.name || name;
+            isAdminFlag = data.isAdmin || isAdminFlag;
+          } else {
+            // Criar perfil no Firestore
+            await setDoc(userDocRef, {
+              name,
+              email: emailLower,
+              isAdmin: isAdminFlag
+            });
+          }
+        } catch (e) {
+          console.error("Erro ao sincronizar informações de perfil do usuário", e);
+        }
+
+        setCurrentUser({
+          uid: userUid,
+          name,
+          email: emailLower,
+          isAdmin: isAdminFlag
+        });
+
+        // 1. Sincronizar receitas em tempo real
+        const unsubscribeRecipes = onSnapshot(collection(db, "recipes"), (snapshot) => {
+          const remoteRecipes: Recipe[] = [];
+          snapshot.forEach((doc) => {
+            const data = doc.data();
+            remoteRecipes.push({
+              id: doc.id,
+              title: data.title,
+              category: data.category,
+              description: data.description || "Receita caseira escrita com muito afeto no aplicativo.",
+              prepTime: data.prepTime,
+              portions: data.portions,
+              ingredients: data.ingredients || [],
+              instructions: data.instructions || [],
+              isPreset: false,
+              imageUrl: data.imageUrl,
+              rating: data.rating || 5,
+              ratingsCount: data.ratingsCount || 1,
+              isPublic: data.isPublic !== false,
+              userEmail: data.userEmail || data.email,
+              authorId: data.authorId,
+              authorName: data.authorName || "Cozinheiro"
+            });
+          });
+          setRecipes([...PRESET_RECIPES, ...remoteRecipes]);
+        }, (err) => {
+          handleFirestoreError(err, OperationType.LIST, "recipes");
+        });
+
+        // 2. Sincronizar comentários em tempo real
+        const unsubscribeComments = onSnapshot(collection(db, "comments"), (snapshot) => {
+          const groupedComments: { [recipeId: string]: RecipeComment[] } = {};
+          snapshot.forEach((doc) => {
+            const d = doc.data();
+            const c: RecipeComment = {
+              id: doc.id,
+              author: d.author || "Cozinheiro",
+              text: d.text || "",
+              timestamp: d.timestamp || "",
+              userEmail: d.userEmail,
+              recipeId: d.recipeId
+            };
+            if (!groupedComments[d.recipeId]) {
+              groupedComments[d.recipeId] = [];
+            }
+            groupedComments[d.recipeId].push(c);
+          });
+          setComments(groupedComments);
+        }, (err) => {
+          handleFirestoreError(err, OperationType.LIST, "comments");
+        });
+
+        // 3. Sincronizar favoritos em tempo real para este usuário
+        const favsQuery = query(collection(db, "favorites"), where("userId", "==", userUid));
+        const unsubscribeFavs = onSnapshot(favsQuery, (snapshot) => {
+          const favList: string[] = [];
+          snapshot.forEach((doc) => {
+            favList.push(doc.data().recipeId);
+          });
+          setFavorites(favList);
+        }, (err) => {
+          handleFirestoreError(err, OperationType.LIST, "favorites");
+        });
+
+        return () => {
+          unsubscribeRecipes();
+          unsubscribeComments();
+          unsubscribeFavs();
+        };
+      } else {
+        // Visitante offline/local sem login do Firebase
+        setCurrentUser(null);
+        
+        // Carrega as receitas customizadas do localStorage
+        const savedCustomRecipes = localStorage.getItem("receitas_casa_custom");
+        if (savedCustomRecipes) {
+          try {
+            const parsed = JSON.parse(savedCustomRecipes);
+            if (Array.isArray(parsed)) {
+              setRecipes([...PRESET_RECIPES, ...parsed]);
+            } else {
+              setRecipes(PRESET_RECIPES);
+            }
+          } catch (_) {
+            setRecipes(PRESET_RECIPES);
+          }
+        } else {
+          setRecipes(PRESET_RECIPES);
+        }
+
+        // Carrega favoritos locais
+        const savedFavorites = localStorage.getItem("receitas_casa_favoritos");
+        if (savedFavorites) {
+          try {
+            const parsed = JSON.parse(savedFavorites);
+            if (Array.isArray(parsed)) {
+              setFavorites(parsed);
+            }
+          } catch (_) {}
+        }
+
+        // Carrega comentários locais
+        const savedComments = localStorage.getItem("receitas_casa_comentarios");
+        if (savedComments) {
+          try {
+            setComments(JSON.parse(savedComments));
+          } catch (_) {}
+        }
+      }
+    });
+
+    return () => unsubscribeAuth();
+  }, []);
+
+  // --- ARQUIVOS DE MÍDIA - COMPRESSOR DE IMAGEM DA PESSOA QUE CRIOU A RECEITA ---
+  const handleImageChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file) {
+      const reader = new FileReader();
+      reader.onload = (event) => {
+        const img = new Image();
+        img.onload = () => {
+          const canvas = document.createElement("canvas");
+          const MAX_WIDTH = 450;
+          const scaleSize = MAX_WIDTH / img.width;
+          canvas.width = MAX_WIDTH;
+          canvas.height = img.height * scaleSize;
+          
+          const ctx = canvas.getContext("2d");
+          if (ctx) {
+            ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+            // Salva em formato JPEG bem comprimido para não atingir o limite de tamanho do localStorage
+            const compressedBase64 = canvas.toDataURL("image/jpeg", 0.65);
+            setNewImageUrl(compressedBase64);
+          }
+        };
+        img.src = event.target?.result as string;
+      };
+      reader.readAsDataURL(file);
+    }
+  };
+
+  // --- CONTROLES AUXILIARES DO CARROSSEL LATERAL ---
+  const handleCarouselScroll = () => {
+    if (carouselRef.current) {
+      const scrollLeft = carouselRef.current.scrollLeft;
+      const width = carouselRef.current.clientWidth || 320;
+      const index = Math.round(scrollLeft / (width - 40)); // Compensar padding lateral amigável
+      setActiveCardIndex(index);
+    }
+  };
+
+  const scrollCarousel = (direction: "left" | "right") => {
+    if (carouselRef.current) {
+      const el = carouselRef.current;
+      const card = el.querySelector(".recipe-carousel-card");
+      const cardWidth = card ? card.clientWidth : 290;
+      const scrollGap = 20; // gap-5 em pixels
+      const step = cardWidth + scrollGap;
+      el.scrollBy({ left: direction === "left" ? -step : step, behavior: "smooth" });
+    }
+  };
+
+  const scrollToCard = (index: number) => {
+    if (carouselRef.current) {
+      const el = carouselRef.current;
+      const card = el.querySelector(".recipe-carousel-card");
+      const cardWidth = card ? card.clientWidth : 290;
+      const scrollGap = 20;
+      el.scrollTo({ left: index * (cardWidth + scrollGap), behavior: "smooth" });
+      setActiveCardIndex(index);
+    }
+  };
+
+  // Reset de estados se mudar de tela ou receita
+  useEffect(() => {
+    setCheckedIngredients({});
+    setCurrentStepIndex(0);
+  }, [selectedRecipe, activeTab, selectedCategory]);
+
+  // --- FAVORITAR RECEITA ---
+  const handleToggleFavorite = async (recipeId: string, event?: React.MouseEvent) => {
+    if (event) event.stopPropagation();
+    
+    if (currentUser && currentUser.uid) {
+      const favId = `${currentUser.uid}_${recipeId}`;
+      const isFav = favorites.includes(recipeId);
+      try {
+        if (isFav) {
+          await deleteDoc(doc(db, "favorites", favId));
+        } else {
+          await setDoc(doc(db, "favorites", favId), {
+            userId: currentUser.uid,
+            recipeId: recipeId,
+            createdAt: serverTimestamp()
+          });
+        }
+      } catch (err) {
+        handleFirestoreError(err, OperationType.WRITE, `favorites/${favId}`);
+      }
+    } else {
+      let updated: string[];
+      if (favorites.includes(recipeId)) {
+        updated = favorites.filter(id => id !== recipeId);
+      } else {
+        updated = [...favorites, recipeId];
+      }
+      setFavorites(updated);
+      localStorage.setItem("receitas_casa_favoritos", JSON.stringify(updated));
+    }
+  };
+
+  // --- EXCLUIR RECEITA DO USUÁRIO ---
+  const [recipeToDelete, setRecipeToDelete] = useState<string | null>(null);
+
+  const handleDeleteCustomRecipe = (recipeId: string, event: React.MouseEvent) => {
+    event.stopPropagation();
+    setRecipeToDelete(recipeId);
+  };
+
+  const confirmDeleteRecipe = async (recipeId: string) => {
+    try {
+      if (currentUser && currentUser.uid) {
+        // Se estiver logado, apagar favoritos no Firestore se existirem
+        const favId = `${currentUser.uid}_${recipeId}`;
+        try {
+          await deleteDoc(doc(db, "favorites", favId));
+        } catch (_) {}
+
+        // Apagar a receita do Firestore
+        await deleteDoc(doc(db, "recipes", recipeId));
+        
+        if (selectedRecipe && selectedRecipe.id === recipeId) {
+          setSelectedRecipe(null);
+        }
+      } else {
+        // 1. Remover de favoritos se estivesse lá (preset ou customizada)
+        const updatedFavs = favorites.filter(id => id !== recipeId);
+        setFavorites(updatedFavs);
+        localStorage.setItem("receitas_casa_favoritos", JSON.stringify(updatedFavs));
+
+        // 2. Tratar receitas customizadas do usuário
+        const savedCustom = localStorage.getItem("receitas_casa_custom");
+        const parsed: Recipe[] = savedCustom ? JSON.parse(savedCustom) : [];
+        const filteredCustom = parsed.filter(r => r.id !== recipeId);
+        localStorage.setItem("receitas_casa_custom", JSON.stringify(filteredCustom));
+        
+        // 3. Atualizar a lista de todas as receitas no estado
+        setRecipes([...PRESET_RECIPES, ...filteredCustom]);
+
+        // 4. Se a receita excluída estava aberta, voltar à lista
+        if (selectedRecipe && selectedRecipe.id === recipeId) {
+          setSelectedRecipe(null);
+        }
+      }
+    } catch (e) {
+      console.error("Erro ao apagar receita", e);
+    }
+  };
+
+  // --- ALTERAR PRIVACIDADE DA RECEITA (PÚBLICA / PRIVADA) ---
+  const handleTogglePrivacy = async (recipeId: string) => {
+    try {
+      if (currentUser && currentUser.uid) {
+        const recipeRef = doc(db, "recipes", recipeId);
+        const recipeDoc = await getDoc(recipeRef);
+        if (recipeDoc.exists()) {
+          const data = recipeDoc.data();
+          const currentPublic = data.isPublic !== false;
+          await setDoc(recipeRef, {
+            ...data,
+            isPublic: !currentPublic,
+            updatedAt: serverTimestamp()
+          });
+          
+          if (selectedRecipe && selectedRecipe.id === recipeId) {
+            setSelectedRecipe(prev => prev ? { ...prev, isPublic: !currentPublic } : null);
+          }
+        }
+      } else {
+        const savedCustom = localStorage.getItem("receitas_casa_custom");
+        if (savedCustom) {
+          const parsed: Recipe[] = JSON.parse(savedCustom);
+          const updated = parsed.map(r => {
+            if (r.id === recipeId) {
+              // Se r.isPublic estiver undefined, assume true por padrão, então inverte para false
+              const currentPublic = r.isPublic !== false; 
+              const toggledPublic = !currentPublic;
+              
+              return { ...r, isPublic: toggledPublic };
+            }
+            return r;
+          });
+          localStorage.setItem("receitas_casa_custom", JSON.stringify(updated));
+          
+          // Atualizar lista local
+          setRecipes([...PRESET_RECIPES, ...updated]);
+          
+          // Atualizar receita selecionada para atualizar a tela de detalhes
+          if (selectedRecipe && selectedRecipe.id === recipeId) {
+            const currentUpdated = updated.find(r => r.id === recipeId);
+            if (currentUpdated) {
+              setSelectedRecipe(currentUpdated);
+            }
+          }
+        }
+      }
+    } catch (e) {
+      console.error("Erro ao alterar privacidade", e);
+    }
+  };
+
+  // --- CONTROLE DE ACESSO (LOGIN / CADASTRO) COM REAL FIREBASE AUTH ---
+  const handleAuthSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setAuthFeedback(null);
+
+    const emailLower = authEmail.trim().toLowerCase();
+    const pass = authPassword.trim();
+
+    if (!emailLower || !pass) {
+      setAuthFeedback("Por favor, preencha o e-mail e a senha.");
+      return;
+    }
+
+    if (pass.length < 6) {
+      setAuthFeedback("Por segurança, a senha deve ter pelo menos 6 caracteres.");
+      return;
+    }
+
+    try {
+      if (authMode === "login") {
+        // Login com Firebase Auth
+        await signInWithEmailAndPassword(auth, emailLower, pass);
+        setIsAuthModalOpen(false);
+        setAuthEmail("");
+        setAuthPassword("");
+        setAuthName("");
+      } else {
+        // Cadastro com Firebase Auth
+        const userCredential = await createUserWithEmailAndPassword(auth, emailLower, pass);
+        const userUid = userCredential.user.uid;
+        
+        const nickname = authName.trim() || emailLower.split("@")[0];
+        
+        // Atualizar perfil do Auth
+        await updateProfile(userCredential.user, {
+          displayName: nickname
+        });
+
+        // Gravar no Firestore
+        const isAdminFlag = emailLower === "luizgustavo14102010@gmail.com" || emailLower === "luizgustavo@luizgustavo.com";
+        await setDoc(doc(db, "users", userUid), {
+          name: nickname,
+          email: emailLower,
+          isAdmin: isAdminFlag
+        });
+
+        setIsAuthModalOpen(false);
+        setAuthEmail("");
+        setAuthPassword("");
+        setAuthName("");
+      }
+    } catch (err: any) {
+      console.error("Erro de Autenticação", err);
+      // Mensagens fáceis de ler para vovôs e vovós:
+      if (err.code === "auth/invalid-credential" || err.code === "auth/wrong-password" || err.code === "auth/user-not-found") {
+        setAuthFeedback("E-mail ou senha incorretos ou não cadastrados. Por favor, confira os dados.");
+      } else if (err.code === "auth/email-already-in-use") {
+        setAuthFeedback("Este e-mail do Google já está sendo usado por outro cozinheiro!");
+      } else if (err.code === "auth/weak-password") {
+        setAuthFeedback("A senha escolhida é muito fraca. Digite pelo menos 6 números ou letras.");
+      } else if (err.code === "auth/invalid-email") {
+        setAuthFeedback("O e-mail digitado parece não ser válido ou está incorreto.");
+      } else {
+        setAuthFeedback(`Ocorreu um imprevisto: ${err.message || err}`);
+      }
+    }
+  };
+
+  const handleGoogleSignIn = async () => {
+    setAuthFeedback(null);
+    try {
+      await signInWithPopup(auth, googleProvider);
+      setIsAuthModalOpen(false);
+    } catch (err: any) {
+      console.error("Erro no Login com Google", err);
+      // Omitir erros comuns de cancelamento
+      if (err.code !== "auth/popup-closed-by-user" && err.code !== "auth/cancelled-popup-request") {
+        setAuthFeedback(`Não conseguimos conectar com o Google: ${err.message || err}`);
+      }
+    }
+  };
+
+  const handleLogout = async () => {
+    try {
+      await signOut(auth);
+      setCurrentUser(null);
+    } catch (e) {
+      console.error("Erro ao sair", e);
+    }
+  };
+
+  // --- CONTROLE DE COMENTÁRIOS COM PERSISTÊNCIA ---
+  const handleSaveComment = async (recipeId: string) => {
+    if (!newCommentText.trim()) {
+      return;
+    }
+
+    const commenterName = currentUser 
+      ? currentUser.name 
+      : (tempCommenterName.trim() || "Visitante");
+
+    const timestampStr = new Date().toLocaleDateString("pt-BR", {
+      day: "2-digit",
+      month: "2-digit",
+      year: "numeric",
+      hour: "2-digit",
+      minute: "2-digit"
+    });
+
+    if (currentUser && currentUser.uid) {
+      const commentId = `comment-${Date.now()}`;
+      try {
+        await setDoc(doc(db, "comments", commentId), {
+          id: commentId,
+          recipeId,
+          author: commenterName,
+          text: newCommentText.trim(),
+          timestamp: timestampStr,
+          userEmail: currentUser.email || null,
+          createdAt: serverTimestamp()
+        });
+        setNewCommentText("");
+      } catch (err) {
+        handleFirestoreError(err, OperationType.WRITE, `comments/${commentId}`);
+      }
+    } else {
+      const newCommentObj: RecipeComment = {
+        id: `comment-${Date.now()}`,
+        author: commenterName,
+        text: newCommentText.trim(),
+        timestamp: timestampStr,
+        userEmail: currentUser ? currentUser.email : undefined
+      };
+
+      const updatedComments = { ...comments };
+      if (!updatedComments[recipeId]) {
+        updatedComments[recipeId] = [];
+      }
+      updatedComments[recipeId] = [newCommentObj, ...updatedComments[recipeId]];
+
+      setComments(updatedComments);
+      localStorage.setItem("receitas_casa_comentarios", JSON.stringify(updatedComments));
+      setNewCommentText("");
+    }
+  };
+
+  const handleDeleteComment = async (recipeId: string, commentId: string) => {
+    if (currentUser && currentUser.uid) {
+      try {
+        await deleteDoc(doc(db, "comments", commentId));
+      } catch (err) {
+        handleFirestoreError(err, OperationType.DELETE, `comments/${commentId}`);
+      }
+    } else {
+      const updatedComments = { ...comments };
+      if (updatedComments[recipeId]) {
+        updatedComments[recipeId] = updatedComments[recipeId].filter(c => c.id !== commentId);
+        setComments(updatedComments);
+        localStorage.setItem("receitas_casa_comentarios", JSON.stringify(updatedComments));
+      }
+    }
+  };
+
+  // --- SALVAR NOVA RECEITA ---
+  const handleSaveRecipe = async (e: React.FormEvent) => {
+    e.preventDefault();
+    try {
+      // Verificações robustas com feedback amigável para idosos
+      const missingFields: string[] = [];
+      if (!newTitle.trim()) {
+        missingFields.push("Qual é o nome do seu prato?");
+      }
+      if (!newPrepTime.trim()) {
+        missingFields.push("Tempo para fazer");
+      }
+      if (!newPortions.trim()) {
+        missingFields.push("Rendimento");
+      }
+      if (!newIngredientsText.trim()) {
+        missingFields.push("Quais são os ingredientes?");
+      }
+      if (!newInstructionsText.trim()) {
+        missingFields.push("Como preparar o prato?");
+      }
+
+      if (missingFields.length > 0) {
+        setFormFeedback(
+          `Atenção: Você esqueceu de preencher alguns campos importantes! 👵 Por favor, preencha: ${missingFields.join(", ")}. Escreva com carinho antes de salvar!`
+        );
+        return;
+      }
+
+      // Se for publicar de forma pública, exige foto
+      if (newIsPublic && !newImageUrl.trim()) {
+        setFormFeedback(
+          "Para publicar a receita de forma pública para todos verem, você precisa adicionar uma linda foto do seu prato! 📸 Se não tiver foto agora, clique em '🔒 SÓ NO CADERNO' para guardar de forma particular no seu caderno de receitas."
+        );
+        return;
+      }
+
+      // Processamento de listas
+      const ingredientsArray = newIngredientsText
+        .split("\n")
+        .map(line => line.trim())
+        .filter(line => line.length > 0);
+
+      const instructionsArray = newInstructionsText
+        .split("\n")
+        .map(line => line.trim())
+        .filter(line => line.length > 0);
+
+      const createdId = `custom-${Date.now()}`;
+      const fallbackImages: { [key: string]: string } = {
+        "Bolos e Broas": "https://images.unsplash.com/photo-1606313564200-e75d5e30476c?auto=format&fit=crop&q=80&w=600",
+        "Sopas e Caldos": "https://images.unsplash.com/photo-1547592180-85f173990554?auto=format&fit=crop&q=80&w=600",
+        "Almoço de Domingo": "https://images.unsplash.com/photo-1546069901-ba9599a7e63c?auto=format&fit=crop&q=80&w=600",
+        "Chás e Receitas de Vó": "https://images.unsplash.com/photo-1576092768241-dec231879fc3?auto=format&fit=crop&q=80&w=600",
+        "Sobremesas e Doces": "https://images.unsplash.com/photo-1533782654613-826a072dd6f3?auto=format&fit=crop&q=80&w=600"
+      };
+
+      const newCategoryToSave = newCategory || "Bolos e Broas";
+
+      if (currentUser && currentUser.uid) {
+        // Salvar no Firestore de forma persistente e segura
+        const newRecipeObj: any = {
+          title: newTitle.trim(),
+          category: newCategoryToSave,
+          description: "Receita caseira escrita com muito afeto no aplicativo.",
+          prepTime: newPrepTime.trim(),
+          portions: `${newPortions.trim()} porções`,
+          ingredients: ingredientsArray,
+          instructions: instructionsArray,
+          imageUrl: newImageUrl || fallbackImages[newCategoryToSave] || "https://images.unsplash.com/photo-1504674900247-0877df9cc836?auto=format&fit=crop&q=80&w=600",
+          rating: newRatingSetting || 5.0,
+          ratingsCount: 1,
+          authorId: currentUser.uid,
+          authorName: currentUser.name || "Cozinheiro",
+          isPublic: newIsPublic,
+          userEmail: currentUser.email,
+          createdAt: serverTimestamp(),
+          updatedAt: serverTimestamp()
+        };
+
+        try {
+          await setDoc(doc(db, "recipes", createdId), newRecipeObj);
+          
+          setSelectedRecipe(null);
+        } catch (fbErr) {
+          handleFirestoreError(fbErr, OperationType.WRITE, `recipes/${createdId}`);
+        }
+      } else {
+        // Salvar local no localStorage para visitantes offline
+        const newRecipeObj: Recipe = {
+          id: createdId,
+          title: newTitle.trim(),
+          category: newCategoryToSave,
+          description: "Receita caseira escrita com muito afeto no aplicativo.",
+          prepTime: newPrepTime.trim(),
+          portions: `${newPortions.trim()} porções`,
+          ingredients: ingredientsArray,
+          instructions: instructionsArray,
+          isPreset: false,
+          imageUrl: newImageUrl || fallbackImages[newCategoryToSave] || "https://images.unsplash.com/photo-1504674900247-0877df9cc836?auto=format&fit=crop&q=80&w=600",
+          rating: newRatingSetting || 5.0,
+          ratingsCount: 1,
+          isPublic: newIsPublic,
+          userEmail: undefined
+        };
+
+        const savedCustom = localStorage.getItem("receitas_casa_custom");
+        let currentCustomList: Recipe[] = [];
+        if (savedCustom) {
+          try {
+            const parsed = JSON.parse(savedCustom);
+            if (Array.isArray(parsed)) {
+              currentCustomList = parsed;
+            }
+          } catch (errParse) {
+            console.error("Erro ao fazer parse das receitas customizadas", errParse);
+          }
+        }
+        
+        let updatedCustomList = [newRecipeObj, ...currentCustomList];
+        
+        try {
+          localStorage.setItem("receitas_casa_custom", JSON.stringify(updatedCustomList));
+        } catch (quotaError) {
+          console.error("Erro de cota de armazenamento local", quotaError);
+          if (newImageUrl) {
+            setFormFeedback("A receita foi salva! Mas por ser uma foto muito pesada, guardamos ela usando a imagem padrão para poupar espaço.");
+            const withoutImageObj = {
+              ...newRecipeObj,
+              imageUrl: fallbackImages[newCategoryToSave] || "https://images.unsplash.com/photo-1504674900247-0877df9cc836?auto=format&fit=crop&q=80&w=600"
+            };
+            updatedCustomList = [withoutImageObj, ...currentCustomList];
+            localStorage.setItem("receitas_casa_custom", JSON.stringify(updatedCustomList));
+            newRecipeObj.imageUrl = withoutImageObj.imageUrl;
+          } else {
+            throw quotaError;
+          }
+        }
+
+        setRecipes([...PRESET_RECIPES, ...updatedCustomList]);
+        setSelectedRecipe(null);
+      }
+
+      // Limpar formulário
+      setNewTitle("");
+      setNewPrepTime("");
+      setNewPortions("");
+      setNewIngredientsText("");
+      setNewInstructionsText("");
+      setNewImageUrl("");
+      setNewIsPublic(true);
+      setNewRatingSetting(5);
+      setFormFeedback(null);
+
+      // Feedback de sucesso visual e ir direto para o caderno "Minhas Receitas"
+      setActiveTab("minhas_receitas");
+    } catch (errorSave: any) {
+      console.error("Erro geral ao salvar receita", errorSave);
+      setFormFeedback(`Desculpe! Ocorreu um problema ao guardar a receita: ${errorSave.message || errorSave}`);
+    }
+  };
+
+  // --- FILTRAR RECEITAS CATEGORIA E BUSCA ---
+  const filteredRecipes = recipes.filter(recipe => {
+    const matchesCategory = selectedCategory ? recipe.category === selectedCategory : true;
+    const matchesSearch = searchQuery.trim() !== "" 
+      ? recipe.title.toLowerCase().includes(searchQuery.toLowerCase()) || 
+        recipe.description.toLowerCase().includes(searchQuery.toLowerCase())
+      : true;
+    return matchesCategory && matchesSearch;
+  });
+
+  // Receitas Favoritas/Customizadas do usuário
+  const mySavedRecipes = recipes.filter(recipe => {
+    const isCustom = !recipe.isPreset && (!recipe.authorId || !currentUser || recipe.authorId === currentUser.uid);
+    const isFav = favorites.includes(recipe.id);
+    return isCustom || isFav;
+  });
+
+  // Classes dinâmicas de tamanho de fonte baseado em acessibilidade com Space Grotesk nos títulos
+  const getFontSizeClass = (type: "titulo-principal" | "subtitulo" | "texto-normal" | "instrucao") => {
+    if (fontSize === "grande") {
+      switch (type) {
+        case "titulo-principal": return "font-display text-2xl font-black tracking-tight";
+        case "subtitulo": return "font-display text-xl font-black";
+        case "texto-normal": return "font-sans text-lg leading-relaxed";
+        case "instrucao": return "font-sans text-base italic text-[#3C3633]/80";
+      }
+    } else if (fontSize === "gigante") {
+      switch (type) {
+        case "titulo-principal": return "font-display text-3xl font-black tracking-tight";
+        case "subtitulo": return "font-display text-2xl font-black";
+        case "texto-normal": return "font-sans text-xl leading-relaxed font-bold";
+        case "instrucao": return "font-sans text-lg italic text-[#3C3633]";
+      }
+    } else { // "mega"
+      switch (type) {
+        case "titulo-principal": return "font-display text-4xl font-black tracking-tight";
+        case "subtitulo": return "font-display text-3xl font-black";
+        case "texto-normal": return "font-sans text-2xl leading-loose font-extrabold";
+        case "instrucao": return "font-sans text-xl font-bold italic text-[#3C3633]";
+      }
+    }
+  };
+
+  return (
+    <div className="min-h-screen bg-[#FDFBF7] md:bg-[#FAF6EE] flex flex-col items-center justify-center py-0 md:py-6 px-0 md:px-4 font-sans text-[#3C3633] selection:bg-[#708238] selection:text-white">
+      
+      {/* HEADER DE SISTEMA - SIMULA EM BANNER FORA DO CELULAR (Visível apenas em computadores) */}
+      <div className="hidden md:flex flex-col items-center mb-5 max-w-md text-center">
+        <div className="bg-white border-4 border-[#3C3633] rounded-[24px] p-4 shadow-[6px_6px_0px_0px_rgba(60,54,51,1)] space-y-1">
+          <h1 className="text-2xl font-display font-black text-[#708238] flex items-center justify-center gap-2 uppercase tracking-wide">
+            <Sparkles className="text-[#708238] animate-pulse h-6 w-6 stroke-[3px]" /> 
+            RECEITAS DA VOVÓ 
+            <Sparkles className="text-[#708238] animate-pulse h-6 w-6 stroke-[3px]" />
+          </h1>
+          <p className="text-xs font-black text-[#3C3633]/85 uppercase tracking-wider">
+            Acessibilidade Ativada • Bento Grid Theme
+          </p>
+        </div>
+      </div>
+
+      {/* RECEPTÁCULO DO DISPOSITIVO SMARTPHONE COM ESTILO BENTO GRID */}
+      {/* No computador: vira um simulador de celular lindo. No smartphone real: se adapta para ocupar a tela cheia perfeitamente sem bordas extras ou rolagem dupla! */}
+      <div id="device-frame" className="w-full md:max-w-md bg-[#FDFBF7] md:shadow-[12px_12px_0px_0px_rgba(60,54,51,1)] md:rounded-[40px] md:border-4 md:border-[#3C3633] overflow-hidden flex flex-col relative h-screen md:h-[760px] transition-all">
+        
+        {/* PARTE SUPERIOR DO CELULAR: ALTO-FALANTE E CÂMERA SIMULADOS (Apenas visível em computadores/telas maiores que simulam o frame) */}
+        <div className="hidden md:flex w-full bg-[#708238] pb-2 justify-center items-center relative z-10 border-b-4 border-[#3C3633]">
+          <div className="w-32 h-4 bg-[#56652B] rounded-b-xl flex items-center justify-center gap-2 border-b border-l border-r border-[#3C3633]">
+            <div className="w-12 h-1 bg-white/40 rounded-full"></div>
+            <div className="w-2 h-2 bg-white/40 rounded-full"></div>
+          </div>
+        </div>
+
+        {/* CABEÇALHO DO APLICATIVO COM O NOME E FOTO DA VOVÓ */}
+        <div className="bg-[#FAF6EE] px-4 py-3 flex items-center justify-between border-b-4 border-[#3C3633] gap-2 z-10 relative">
+          <div className="flex items-center gap-2.5">
+            <img 
+              src="/src/assets/images/vovo_avatar_1781440678195.jpg" 
+              alt="Vovó" 
+              className="w-10 h-10 rounded-full border-2 border-[#3C3633] shadow-[2px_2px_0px_0px_rgba(60,54,51,1)] object-cover bg-[#FFDE4D]"
+              referrerPolicy="no-referrer"
+            />
+            <h2 className="text-lg font-display font-black text-[#3C3633] tracking-wider uppercase">
+              Receitas da Vovó
+            </h2>
+          </div>
+
+          {/* Botão de Conta do Usuário */}
+          <button 
+            type="button"
+            onClick={() => setIsAuthModalOpen(true)}
+            className="flex items-center gap-1.5 bg-[#FFDE4D] border-2 border-[#3C3633] px-3 py-1.5 rounded-xl text-[10px] font-black uppercase text-[#3C3633] shadow-[2.5px_2.5px_0px_0px_rgba(60,54,51,1)] hover:bg-[#FFD41A] cursor-pointer transition-all active:translate-x-0.5 active:translate-y-0.5 active:shadow-none"
+            title={currentUser ? `Logado como ${currentUser.name}` : "Entrar / Cadastrar"}
+          >
+            {currentUser ? (
+              <span className="flex items-center gap-1">
+                👤 {currentUser.isAdmin ? "Vovó Admin" : currentUser.name.split(" ")[0]}
+              </span>
+            ) : (
+              <span className="flex items-center gap-1">🔑 Entrar</span>
+            )}
+          </button>
+        </div>
+
+        {/* --- CONTEÚDO PRINCIPAL (TELA ATIVA) --- */}
+        <div 
+          className={`flex-1 ${activeTab === "ver_receitas" && !selectedRecipe ? "overflow-hidden flex flex-col h-full" : "overflow-y-auto"} px-4 py-4 ${activeTab === "ver_receitas" && !selectedRecipe ? "pb-3" : "pb-32"} relative`} 
+          style={{ scrollbarWidth: "thin" }}
+        >
+          
+          {/* CASO HOUVER UMA RECEITA SELECIONADA, EXIBIR DETALHE ANTES DA TELA PADRÃO */}
+          {selectedRecipe ? (
+            <div className="space-y-5" id="recipe-details-screen">
+              {/* Botão de Voltar gigante e confortável */}
+              <button 
+                id="btn-voltar-detalhe"
+                onClick={() => {
+                  setSelectedRecipe(null);
+                  setCurrentStepIndex(0);
+                }}
+                className="w-full flex items-center justify-center gap-3 bg-white border-4 border-[#3C3633] hover:bg-[#F5F2ED] active:bg-[#3C3633] active:text-white py-3.5 px-4 rounded-[24px] shadow-[4px_4px_0px_0px_rgba(60,54,51,1)] text-[#3C3633] font-black transition-all active:translate-x-0.5 active:translate-y-0.5 active:shadow-none text-lg"
+              >
+                <ArrowLeft className="h-7 w-7 stroke-[3px]" />
+                <span>VOLTAR PARA A LISTA</span>
+              </button>
+
+              {/* Card da Receita */}
+              <div className="bg-white border-4 border-[#3C3633] rounded-[32px] p-6 shadow-[6px_6px_0px_0px_rgba(60,54,51,1)] space-y-5">
+                
+                {/* Imagem salva da receita */}
+                {selectedRecipe.imageUrl && (
+                  <div className="w-full h-[220px] rounded-[24px] overflow-hidden border-4 border-[#3C3633] shadow-[4px_4px_0px_0px_rgba(60,54,51,1)] bg-[#FAF6EE] relative animate-fadeIn">
+                    <img 
+                      src={selectedRecipe.imageUrl} 
+                      alt={selectedRecipe.title} 
+                      className="w-full h-full object-cover" 
+                      referrerPolicy="no-referrer"
+                    />
+                  </div>
+                )}
+
+                {/* Opção de Publicar para todos ou Privar (Apenas se for receita do usuário) */}
+                {!selectedRecipe.isPreset && (
+                  <div className="bg-[#FAF6EE] border-4 border-[#3C3633] rounded-[24px] p-4.5 space-y-3 shadow-[4px_4px_0px_0px_rgba(60,54,51,1)] text-left animate-fadeIn">
+                    <div className="flex items-start gap-2.5">
+                      <span className="text-2xl mt-0.5">
+                        {selectedRecipe.isPublic !== false ? "🌍" : "🔒"}
+                      </span>
+                      <div>
+                        <h4 className="font-display font-black text-sm text-[#3C3633] uppercase">
+                          Privacidade da Receita
+                        </h4>
+                        <p className="text-[11px] text-gray-500 font-bold leading-tight">
+                          {selectedRecipe.isPublic !== false 
+                            ? "Status: Publicada para todos! Outras pessoas podem ver e cozinhar." 
+                            : "Status: Privada. Salva apenas no seu caderno de receitas do aplicativo."}
+                        </p>
+                      </div>
+                    </div>
+                    
+                    <div className="flex gap-2">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          if (selectedRecipe.isPublic !== false) {
+                            handleTogglePrivacy(selectedRecipe.id);
+                          }
+                        }}
+                        className={`flex-1 py-1.5 px-3 rounded-xl border-2 text-[10px] font-black uppercase text-center cursor-pointer transition-all ${
+                          selectedRecipe.isPublic === false 
+                            ? "bg-[#FFEBE6] border-[#FFA3A3] text-red-800 ring-2 ring-red-200" 
+                            : "bg-white border-[#3C3633] text-[#3C3633] hover:bg-gray-100"
+                        }`}
+                      >
+                        🔒 DEIXAR PRIVADA
+                      </button>
+                      
+                      <button
+                        type="button"
+                        onClick={() => {
+                          if (selectedRecipe.isPublic !== false) {
+                            // Já é público, não faz nada
+                          } else {
+                            handleTogglePrivacy(selectedRecipe.id);
+                          }
+                        }}
+                        className={`flex-1 py-1.5 px-3 rounded-xl border-2 text-[10px] font-black uppercase text-center cursor-pointer transition-all ${
+                          selectedRecipe.isPublic !== false 
+                            ? "bg-[#E6EDDF] border-[#708238] text-[#708238] ring-2 ring-green-100" 
+                            : "bg-white border-[#3C3633] text-[#3C3633] hover:bg-gray-100"
+                        }`}
+                      >
+                        🌍 PUBLICAR GERAL
+                      </button>
+                    </div>
+                  </div>
+                )}
+                
+                {/* Título e botão de Favoritar */}
+                <div className="flex justify-between items-start gap-2 border-b-4 border-[#F5F2ED] pb-4">
+                  <div>
+                    <span className="inline-block bg-[#708238]/10 text-[#708238] font-black text-xs px-3.5 py-1 rounded-xl border border-[#708238]/30 uppercase tracking-wider mb-2">
+                      {selectedRecipe.category}
+                    </span>
+                    <h2 className={`${getFontSizeClass("titulo-principal")} text-[#3C3633]`}>
+                      {selectedRecipe.title}
+                    </h2>
+                  </div>
+                  <button 
+                    id={`btn-fav-detail-${selectedRecipe.id}`}
+                    onClick={() => handleToggleFavorite(selectedRecipe.id)}
+                    className="p-3 bg-[#FDFBF7] rounded-full border-4 border-[#3C3633] active:scale-95 transition-transform shadow-[3px_3px_0px_0px_rgba(60,54,51,1)] cursor-pointer"
+                    title={favorites.includes(selectedRecipe.id) ? "Remover de Favoritos" : "Favoritar Receita"}
+                  >
+                    <Heart 
+                      className={`h-8 w-8 transition-colors ${favorites.includes(selectedRecipe.id) ? "fill-[#A0352A] stroke-[#2E1B10] stroke-[1px]" : "stroke-gray-400"}`} 
+                    />
+                  </button>
+                </div>
+
+                {/* Tempo e Rendimento */}
+                <div className="grid grid-cols-2 gap-4 bg-[#F5F2ED] p-4 rounded-2xl border-2 border-[#3C3633]">
+                  <div className="flex items-center gap-3">
+                    <Clock className="h-6 w-6 text-[#708238] stroke-[3px]" />
+                    <div className="text-left">
+                      <p className="text-[10px] uppercase font-black text-[#3C3633]/60 tracking-wider">Tempo</p>
+                      <p className="text-sm font-black text-[#3C3633]">{selectedRecipe.prepTime}</p>
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-3">
+                    <Users className="h-6 w-6 text-[#708238] stroke-[3px]" />
+                    <div className="text-left">
+                      <p className="text-[10px] uppercase font-black text-[#3C3633]/60 tracking-wider">Rendimento</p>
+                      <p className="text-sm font-black text-[#3C3633]">{selectedRecipe.portions}</p>
+                    </div>
+                  </div>
+                </div>
+
+                {/* SELETOR DE MODO DE VISUALIZAÇÃO - BENTO GRID ESTILO RÍGIDO */}
+                <div className="border-t-2 border-b-2 border-gray-100 py-3.5 flex items-center justify-between gap-1">
+                  <span className="text-xs font-black uppercase text-gray-500">Visualizar em:</span>
+                  <div className="flex bg-[#F5F2ED] p-1.5 rounded-2xl gap-1 border-2 border-[#3C3633]">
+                    <button 
+                      id="btn-view-completa"
+                      onClick={() => setRecipeViewMode("completa")}
+                      className={`px-4 py-2 rounded-xl text-xs font-black transition-all cursor-pointer ${recipeViewMode === "completa" ? "bg-[#708238] text-white shadow-sm" : "text-[#3C3633]/60 hover:text-black"}`}
+                    >
+                      Completo
+                    </button>
+                    <button 
+                      id="btn-view-passos"
+                      onClick={() => {
+                        setRecipeViewMode("passo-a-passo");
+                        setCurrentStepIndex(0);
+                      }}
+                      className={`px-4 py-2 rounded-xl text-xs font-black transition-all cursor-pointer ${recipeViewMode === "passo-a-passo" ? "bg-[#708238] text-white shadow-sm" : "text-[#3C3633]/60 hover:text-black"}`}
+                    >
+                      Passo a Passo
+                    </button>
+                  </div>
+                </div>
+
+                {/* CONTEÚDO BASEADO NO MODO DE VISUALIZAÇÃO */}
+                {recipeViewMode === "completa" ? (
+                  <div className="space-y-5">
+                    {/* Lista de Ingredientes com Checklist Interativo */}
+                    <div className="space-y-2">
+                      <div className="flex justify-between items-center bg-[#FDFBF7] border-2 border-[#3C3633] px-3.5 py-2 rounded-xl">
+                        <h3 className={`${getFontSizeClass("subtitulo")} text-[#708238]`}>
+                          Ingredientes
+                        </h3>
+                        <span className="text-xs font-bold text-[#3C3633]/60">Marque o que já pegou</span>
+                      </div>
+                      
+                      <div className="space-y-2">
+                        {selectedRecipe.ingredients.map((ing, idx) => (
+                          <div 
+                            key={idx} 
+                            onClick={() => setCheckedIngredients({
+                              ...checkedIngredients,
+                              [idx]: !checkedIngredients[idx]
+                            })}
+                            className={`flex items-start gap-3.5 p-4 rounded-2xl border-2 transition-all cursor-pointer select-none ${checkedIngredients[idx] ? "bg-gray-100 border-gray-300 text-gray-400" : "bg-white border-[#3C3633] hover:border-[#708238] shadow-[2px_2px_0px_0px_rgba(60,54,51,1)]"}`}
+                          >
+                            <div className={`mt-0.5 min-w-7 min-h-7 h-7 w-7 rounded-xl flex items-center justify-center transition-all border-2 ${checkedIngredients[idx] ? "bg-gray-400 border-gray-400 text-white" : "bg-[#FDFBF7] border-[#3C3633] text-[#708238]"}`}>
+                              <Check className="h-5 w-5 stroke-[4px]" />
+                            </div>
+                            <span className={`${getFontSizeClass("texto-normal")} ${checkedIngredients[idx] ? "line-through text-gray-400 font-normal" : "text-[#3C3633] font-bold"}`}>
+                              {ing}
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+
+                    {/* Modo de fazer Completo */}
+                    <div className="space-y-2">
+                      <div className="bg-[#FDFBF7] border-2 border-[#3C3633] px-3.5 py-2 rounded-xl">
+                        <h3 className={`${getFontSizeClass("subtitulo")} text-[#708238]`}>
+                          Como Preparar
+                        </h3>
+                      </div>
+                      <div className="space-y-4 pt-1">
+                        {selectedRecipe.instructions.map((step, idx) => (
+                          <div key={idx} className="flex gap-4 items-start p-4 bg-white border-2 border-[#3C3633] rounded-2xl shadow-[3px_3px_0px_0px_rgba(60,54,51,1)]">
+                            <span className="min-w-10 min-h-10 rounded-xl bg-[#708238]/10 border-2 border-[#708238] font-black text-[#708238] flex items-center justify-center text-lg">
+                              {idx + 1}
+                            </span>
+                            <p className={`${getFontSizeClass("texto-normal")} text-[#3C3633] text-left leading-relaxed font-bold`}>
+                              {step}
+                            </p>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+                ) : (
+                  /* MODO DE VISUALIZAÇÃO INTERATIVO PASSO A PASSO (Vovó e Vovô friendly!) */
+                  <div className="space-y-4" id="step-by-step-workflow">
+                    <div className="bg-[#FDFBF7] border-2 border-[#3C3633] p-4 rounded-2xl text-center">
+                      <span className="text-xs uppercase font-extrabold text-[#708238] tracking-widest">
+                        Passo {currentStepIndex + 1} de {selectedRecipe.instructions.length}
+                      </span>
+                      <div className="w-full bg-[#3C3633]/15 h-3 rounded-full overflow-hidden mt-1.5 border border-[#3C3633]/20">
+                        <div 
+                          className="bg-[#708238] h-full transition-all duration-300" 
+                          style={{ width: `${((currentStepIndex + 1) / selectedRecipe.instructions.length) * 100}%` }}
+                        ></div>
+                      </div>
+                    </div>
+
+                     {/* Bloco Central do Passo em tamanho gigante */}
+                    <div className="bg-white border-4 border-[#3C3633] p-10 rounded-[32px] shadow-[4px_4px_0px_0px_rgba(60,54,51,1)] min-h-[190px] flex flex-col justify-center items-center text-center">
+                      
+                      <p className={`${getFontSizeClass("texto-normal")} text-[#3C3633] text-center font-bold leading-relaxed`}>
+                        {selectedRecipe.instructions[currentStepIndex]}
+                      </p>
+                    </div>
+
+                    {/* Botões confortáveis de Avançar / Voltar o Passo */}
+                    <div className="grid grid-cols-2 gap-4">
+                      <button
+                        id="btn-passo-anterior"
+                        disabled={currentStepIndex === 0}
+                        onClick={() => {
+                          if (currentStepIndex > 0) {
+                            setCurrentStepIndex(currentStepIndex - 1);
+                          }
+                        }}
+                        className={`py-4 px-4 font-black rounded-2xl border-4 transition-all text-base flex justify-center items-center gap-1 ${currentStepIndex === 0 ? "bg-gray-100 text-gray-300 border-gray-200 cursor-not-allowed shadow-none" : "bg-white text-[#3C3633] border-[#3C3633] shadow-[3px_3px_0px_0px_rgba(60,54,51,1)] cursor-pointer active:translate-x-0.5 active:translate-y-0.5 active:shadow-none"}`}
+                      >
+                        ⬅ Voltar
+                      </button>
+                      <button
+                        id="btn-proximo-passo"
+                        onClick={() => {
+                          if (currentStepIndex < selectedRecipe.instructions.length - 1) {
+                            setCurrentStepIndex(currentStepIndex + 1);
+                          } else {
+                            // Fim dos passos! Voltar para a visualização completa
+                            alert("Muito bem! Você completou todas as etapas desta receita de sucesso!");
+                            setRecipeViewMode("completa");
+                          }
+                        }}
+                        className="py-4 px-4 font-black rounded-2xl bg-[#708238] text-white hover:bg-[#5C6E2C] border-4 border-[#3C3633] shadow-[3px_3px_0px_0px_rgba(60,54,51,1)] transition-all cursor-pointer active:translate-x-0.5 active:translate-y-0.5 active:shadow-none text-base flex justify-center items-center gap-1"
+                      >
+                        {currentStepIndex === selectedRecipe.instructions.length - 1 ? "Terminar 🎉" : "Próximo ➡"}
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+                {/* SEÇÃO DE COMENTÁRIOS COZINHA DA VOVÓ */}
+                <div className="bg-white border-4 border-[#3C3633] rounded-[28px] p-5 shadow-[4px_4px_0px_0px_rgba(60,54,51,1)] space-y-4 text-left">
+                  <div className="flex items-center gap-2 border-b-2 border-gray-100 pb-2">
+                    <span className="text-xl">💬</span>
+                    <h3 className="font-display font-black text-base text-[#3C3633] uppercase">
+                      Comentários ({comments[selectedRecipe.id]?.length || 0})
+                    </h3>
+                  </div>
+
+                  {/* Lista de Comentários */}
+                  <div className="space-y-3 max-h-[220px] overflow-y-auto pr-1">
+                    {(!comments[selectedRecipe.id] || comments[selectedRecipe.id].length === 0) ? (
+                      <p className="text-gray-400 font-bold text-center py-4 text-xs">
+                        Nenhum comentário ainda. Deixe um carinho para a vovó! 🌸
+                      </p>
+                    ) : (
+                      comments[selectedRecipe.id].map((comment) => (
+                        <div key={comment.id} className="p-3 bg-[#FAF6EE] border-2 border-[#3C3633] rounded-2xl relative shadow-[2px_2px_0px_0px_rgba(60,54,51,0.05)]">
+                          <div className="flex justify-between items-start gap-2">
+                            <div>
+                              <span className="text-xs font-black text-[#708238] block leading-tight">
+                                {comment.author} 
+                                {comment.userEmail && <span className="text-[9px] text-gray-400 font-normal ml-1">({comment.userEmail})</span>}
+                                {comment.userEmail === 'luizgustavo14102010@gmail.com' && (
+                                  <span className="ml-1.5 bg-amber-100 text-amber-800 text-[9px] font-black px-1 py-0.5 rounded uppercase border border-amber-300">
+                                    Vovó Admin ⭐
+                                  </span>
+                                )}
+                              </span>
+                              <span className="text-[9px] text-gray-400 font-semibold block mt-0.5">
+                                {comment.timestamp}
+                              </span>
+                            </div>
+                            
+                            {/* Opção de Excluir Comentário (Admin ou o próprio autor do comentário) */}
+                            {(currentUser?.isAdmin || (currentUser && currentUser.email === comment.userEmail)) && (
+                              <button
+                                type="button"
+                                onClick={() => handleDeleteComment(selectedRecipe.id, comment.id)}
+                                className="text-red-700 hover:text-red-900 bg-red-50 hover:bg-red-100 border border-red-200 p-1.5 rounded-lg transition-all cursor-pointer"
+                                title="Excluir Comentário"
+                              >
+                                <Trash2 className="h-3 w-3" />
+                              </button>
+                            )}
+                          </div>
+                          <p className="text-xs font-bold text-[#3C3633] mt-2 whitespace-pre-wrap leading-relaxed">
+                            {comment.text}
+                          </p>
+                        </div>
+                      ))
+                    )}
+                  </div>
+
+                  {/* Escrever novo comentário */}
+                  <div className="space-y-3 pt-3 border-t-2 border-gray-100">
+                    <div className="space-y-1">
+                      <span className="text-[10px] font-black text-[#3C3633]/70 uppercase tracking-wider block">
+                        Deixe seu Recado:
+                      </span>
+                      {currentUser ? (
+                        <div className="text-[10px] font-black text-gray-500 bg-[#FAF6EE] px-3 py-2 rounded-xl border border-dashed border-[#3C3633]/20 flex items-center gap-1">
+                          <span>Comentando como: <strong className="text-[#708238]">{currentUser.name}</strong> ({currentUser.email})</span>
+                        </div>
+                      ) : (
+                        <input 
+                          type="text"
+                          value={tempCommenterName}
+                          onChange={(e) => setTempCommenterName(e.target.value)}
+                          placeholder="Seu nome ou apelido (Ex: Maria)..."
+                          maxLength={30}
+                          className="w-full text-xs font-bold p-2.5 bg-white border-2 border-[#3C3633] rounded-[14px] focus:outline-none placeholder-gray-400 shadow-[2px_2px_0px_0px_rgba(60,54,51,0.05)]"
+                        />
+                      )}
+                    </div>
+
+                    <div className="relative">
+                      <textarea
+                        value={newCommentText}
+                        onChange={(e) => setNewCommentText(e.target.value)}
+                        rows={2}
+                        placeholder="Adicione um comentário carinhoso..."
+                        maxLength={300}
+                        className="w-full text-xs font-bold p-3 bg-white border-2 border-[#3C3633] rounded-[18px] focus:outline-none placeholder-gray-400 resize-none pr-12 shadow-[2px_2px_0px_0px_rgba(60,54,51,0.05)]"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => handleSaveComment(selectedRecipe.id)}
+                        className="absolute bottom-3 right-3 p-2 bg-[#708238] hover:bg-[#5C6E2C] text-white rounded-xl border-2 border-[#3C3633] shadow-[2px_2px_0px_0px_rgba(60,54,51,1)] cursor-pointer active:scale-95 transition-all text-[10px] font-black uppercase"
+                        title="Enviar Comentário"
+                      >
+                        Enviar
+                      </button>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Excluir Receita (se for do usuário ou administrador) */}
+                {!selectedRecipe.isPreset && (!selectedRecipe.userEmail || (currentUser && selectedRecipe.userEmail === currentUser.email) || currentUser?.isAdmin) && (
+                  <div className="pt-2 border-t-2 border-[#F5F2ED] flex justify-end">
+                    <button
+                      id={`btn-delete-recipe-${selectedRecipe.id}`}
+                      onClick={(e) => handleDeleteCustomRecipe(selectedRecipe.id, e)}
+                      className="py-2.5 px-4 bg-[#FFEBE6] border-2 border-[#FFA3A3] hover:bg-red-50 text-red-800 rounded-xl text-xs font-black tracking-wide flex items-center gap-1.5 active:scale-95 transition-transform cursor-pointer"
+                    >
+                      <Trash2 className="h-4 w-4" />
+                      {currentUser?.isAdmin ? "APAGAR (ADMINISTRADOR)" : "APAGAR ESTA RECEITA"}
+                    </button>
+                  </div>
+                )}
+              </div>
+            </div>
+          ) : (
+            /* --- NAVEGAÇÃO DE ABAS PADRÃO (TELA ATIVA NÃO RECEITA) --- */
+            <div>
+                {/* TELA 1: VER RECEITAS */}
+              {activeTab === "ver_receitas" && (
+                <div className="h-full flex flex-col overflow-hidden gap-3 justify-start" id="view-recipes-tab">
+                  
+                  {/* Input de Busca Grande e Fácil de Ler (Agora no Topo) */}
+                  <div className="relative pt-1 shrink-0">
+                    <div className="absolute inset-y-0 left-0 pl-4 flex items-center pointer-events-none">
+                      <Search className="h-6 w-6 text-[#3C3633] stroke-[3px]" />
+                    </div>
+                    <input 
+                      id="search-input"
+                      type="text"
+                      value={searchQuery}
+                      onChange={(e) => setSearchQuery(e.target.value)}
+                      placeholder="Buscar por nome (ex: bolo)..."
+                      className="w-full pl-12 pr-11 py-3 bg-white border-4 border-[#3C3633] rounded-[24px] text-base font-extrabold focus:outline-none placeholder-gray-400 shadow-[4px_4px_0px_0px_rgba(60,54,51,0.15)]"
+                    />
+                    {searchQuery && (
+                      <button 
+                        id="btn-clear-search"
+                        onClick={() => setSearchQuery("")}
+                        className="absolute inset-y-0 right-0 pr-4 flex items-center text-red-800 hover:text-black font-black text-sm"
+                      >
+                        LIMPAR
+                      </button>
+                    )}
+                  </div>
+
+                  {/* CARROSSEL DE RECEITAS (Filtrado se houver busca) */}
+                  <div className="flex-1 min-h-0 flex flex-col justify-start gap-3 mt-4">
+                    {filteredRecipes.length === 0 ? (
+                      <div className="bg-white border-4 border-[#3C3633] p-5 rounded-[32px] text-center space-y-2 my-auto shadow-[4px_4px_0px_0px_rgba(60,54,51,1)]">
+                        <p className="text-base text-[#3C3633] font-black uppercase font-display">Sem resultados</p>
+                        <p className="text-xs text-gray-500 font-bold">Nenhuma receita encontrada para sua busca hoje!</p>
+                        <button
+                          onClick={() => setSearchQuery("")}
+                          className="px-4 py-2 bg-[#708238] border-2 border-[#3C3633] text-white text-xs font-black rounded-xl shadow-[2px_2px_0px_0px_rgba(60,54,51,1)] cursor-pointer"
+                        >
+                          Limpar Busca
+                        </button>
+                      </div>
+                    ) : (
+                      <div className="relative flex flex-col justify-start min-h-0 flex-1 gap-3">
+                        {/* Carrossel Horizontal */}
+                        <div 
+                          ref={carouselRef}
+                          onScroll={handleCarouselScroll}
+                          className="flex overflow-x-auto snap-x snap-mandatory gap-4 pb-2 pt-1 scroll-smooth no-scrollbar"
+                          style={{ scrollbarWidth: "none", msOverflowStyle: "none" }}
+                        >
+                          {filteredRecipes.map((recipe) => (
+                            <div
+                              id={`recipe-card-home-${recipe.id}`}
+                              key={recipe.id}
+                              className="w-[270px] xs:w-[285px] shrink-0 snap-center bg-white border-4 border-[#3C3633] rounded-[32px] overflow-hidden shadow-[4px_4px_0px_0px_rgba(60,54,51,1)] flex flex-col relative hover:border-[#708238] transition-all recipe-carousel-card animate-fadeIn"
+                            >
+                              {/* Imagem Real do Criador ou Preset */}
+                              <div className="relative h-[130px] w-full border-b-4 border-[#3C3633] bg-[#FAF6EE] overflow-hidden shrink-0">
+                                <img 
+                                  src={recipe.imageUrl || "https://images.unsplash.com/photo-1504674900247-0877df9cc836?auto=format&fit=crop&q=80&w=600"} 
+                                  alt={recipe.title}
+                                  className="w-full h-full object-cover"
+                                  referrerPolicy="no-referrer"
+                                />
+                                
+                                {/* Nota de Avaliação (Estrelas da Vó) */}
+                                <div className="absolute top-2 left-2 bg-white border-2 border-[#3C3633] px-2 py-0.5 rounded-lg flex items-center gap-1 shadow-[2px_2px_0px_0px_rgba(60,54,51,1)] z-10">
+                                  <Star className="h-3.5 w-3.5 text-amber-500 fill-amber-500 stroke-[#3C3633] stroke-[1px]" />
+                                  <span className="text-[11px] font-black text-[#3C3633]">{recipe.rating || 5.0}</span>
+                                </div>
+
+                                {/* Botão de Coração */}
+                                <button
+                                  onClick={(e) => handleToggleFavorite(recipe.id, e)}
+                                  className="absolute top-2 right-2 p-1.5 bg-white/95 rounded-full border-2 border-[#3C3633] active:scale-95 transition-transform shadow-[2px_2px_0px_0px_rgba(60,54,51,1)] z-10 cursor-pointer"
+                                  title="Favoritar"
+                                >
+                                  <Heart 
+                                    className={`h-4 w-4 transition-colors ${favorites.includes(recipe.id) ? "fill-[#A0352A] stroke-[#2E1B10] stroke-[1.5px]" : "stroke-gray-400"}`} 
+                                  />
+                                </button>
+
+                                {!recipe.isPreset && (
+                                  <span className="absolute bottom-1.5 right-1.5 bg-[#708238] border-2 border-[#3C3633] text-white text-[8px] font-black px-1.5 py-0.5 rounded-md uppercase tracking-wider shadow-[2px_2px_0px_0px_rgba(60,54,51,1)]">
+                                    Minha {recipe.isPublic !== false ? "🌍" : "🔒"}
+                                  </span>
+                                )}
+                              </div>
+
+                              {/* Corpo do Card com avaliação em destaque */}
+                              <div className="p-3 flex-1 flex flex-col justify-between text-left space-y-1.5">
+                                <div>
+                                  <span className="text-[9px] font-extrabold uppercase tracking-widest text-[#708238]">
+                                    {recipe.category}
+                                  </span>
+                                  <h4 className="font-display text-base font-black text-[#3C3633] line-clamp-1 leading-tight">
+                                    {recipe.title}
+                                  </h4>
+                                  <p className="text-[11px] text-gray-500 font-bold line-clamp-2 leading-relaxed mt-0.5">
+                                    {recipe.description}
+                                  </p>
+                                </div>
+
+                                <div className="pt-1.5 border-t border-[#F5F2ED] flex items-center justify-between">
+                                  <div className="flex gap-2 text-xs font-bold text-gray-500">
+                                    <span className="flex items-center gap-1 font-extrabold text-[#3C3633]/70">
+                                      <Clock className="h-3.5 w-3.5 text-[#708238] stroke-[2px]" />
+                                      {recipe.prepTime}
+                                    </span>
+                                  </div>
+                                  
+                                  <button
+                                    onClick={() => setSelectedRecipe(recipe)}
+                                    className="text-xs font-black text-white bg-[#708238] border-2 border-[#3C3633] px-3.5 py-1.5 rounded-xl shadow-[2px_2px_0px_0px_rgba(60,54,51,1)] active:translate-x-0.5 active:translate-y-0.5 active:shadow-[0px_0px_0px_0px] hover:bg-[#5C6E2C] transition-all cursor-pointer"
+                                  >
+                                    ABRIR ➡
+                                  </button>
+                                </div>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+
+                        {/* Setas e Controles para Idosos deslizarem com facilidade */}
+                        <div className="flex justify-between items-center mt-2 px-1 shrink-0">
+                          <button
+                            onClick={() => scrollCarousel("left")}
+                            className="px-3.5 py-2.5 bg-white hover:bg-[#F5F2ED] text-[#3C3633] text-xs font-black rounded-xl border-3 border-[#3C3633] shadow-[2px_2px_0px_0px_rgba(60,54,51,1)] active:translate-x-0.5 active:translate-y-0.5 active:shadow-none transition-all flex items-center gap-1 cursor-pointer"
+                          >
+                            ⬅ VER ANTERIOR
+                          </button>
+                          
+                          <button
+                            onClick={() => scrollCarousel("right")}
+                            className="px-3.5 py-2.5 bg-[#708238] hover:bg-[#5C6E2C] text-white text-xs font-black rounded-xl border-3 border-[#3C3633] shadow-[2px_2px_0px_0px_rgba(60,54,51,1)] active:translate-x-0.5 active:translate-y-0.5 active:shadow-none transition-all flex items-center gap-1 cursor-pointer"
+                          >
+                            VER PRÓXIMA ➡
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+
+                </div>
+              )}
+
+              {/* TELA 2: CRIAR RECEITA */}
+              {activeTab === "criar_receita" && (
+                <div className="space-y-4" id="create-recipe-tab">
+                  <div className="bg-[#708238]/10 border-4 border-[#708238] p-5 rounded-[28px] space-y-1.5 shadow-[4px_4px_0px_0px_rgba(112,130,56,0.15)]">
+                    <span className="text-xs font-black uppercase bg-white text-[#708238] border border-[#708238] px-3 py-1 rounded-full inline-block">
+                      PASSO FÁCIL
+                    </span>
+                    <h2 className="text-[19px] font-display font-black text-[#3C3633] uppercase">
+                      Criar Receita de Família
+                    </h2>
+                    <p className="text-xs text-[#3C3633] font-bold leading-relaxed">
+                      Preencha os campos abaixo com calma. Não se preocupe com erros, escreva do seu jeito!
+                    </p>
+                  </div>
+
+                  {formFeedback && (
+                    <div className="bg-[#FFEBE6] border-4 border-[#3C3633] p-4 rounded-2xl text-red-800 text-xs font-black flex items-center gap-2 shadow-[3px_3px_0px_0px_rgba(60,54,51,1)]">
+                      <span className="bg-red-800 text-white w-5 h-5 rounded-full flex items-center justify-center font-black">!</span>
+                      <span>{formFeedback}</span>
+                    </div>
+                  )}
+
+                  <form onSubmit={handleSaveRecipe} className="space-y-4">
+                    
+                    {/* Campo: Nome da Receita */}
+                    <div className="space-y-1.5">
+                      <label className="text-sm font-black text-[#3C3633] block font-display tracking-wide uppercase" htmlFor="input-titulo">
+                        1. Qual é o nome do seu prato?
+                      </label>
+                      <input 
+                        id="input-titulo"
+                        type="text"
+                        value={newTitle}
+                        onChange={(e) => setNewTitle(e.target.value)}
+                        placeholder="Ex: Torta de Maçã Simples da Maria"
+                        className="w-full p-4 bg-white border-4 border-[#3C3633] rounded-2xl text-base font-extrabold shadow-[2px_2px_0px_0px_rgba(60,54,51,0.1)] focus:border-[#708238] transition-all"
+                      />
+                    </div>
+
+                    {/* Campo Duplo: Tempo e Rendimento */}
+                    <div className="grid grid-cols-2 gap-3">
+                      <div className="space-y-1.5">
+                        <label className="text-xs font-black text-[#3C3633] block font-display uppercase" htmlFor="input-tempo">
+                          Tempo para fazer:
+                        </label>
+                        <input 
+                          id="input-tempo"
+                          type="text"
+                          value={newPrepTime}
+                          onChange={(e) => setNewPrepTime(e.target.value)}
+                          placeholder="Ex: 40 minutos"
+                          className="w-full p-3 bg-white border-4 border-[#3C3633] rounded-2xl text-xs font-black shadow-[2px_2px_0px_0px_rgba(60,54,51,0.1)] focus:border-[#708238]"
+                        />
+                      </div>
+                      <div className="space-y-1.5">
+                        <label className="text-xs font-black text-[#3C3633] block font-display uppercase" htmlFor="input-rendimento">
+                          Rendimento:
+                        </label>
+                        <div className="relative flex items-center">
+                          <input 
+                            id="input-rendimento"
+                            type="number"
+                            min="1"
+                            value={newPortions}
+                            onChange={(e) => setNewPortions(e.target.value)}
+                            placeholder="Ex: 10"
+                            className="w-full p-3 pr-20 bg-white border-4 border-[#3C3633] rounded-2xl text-xs font-black shadow-[2px_2px_0px_0px_rgba(60,54,51,0.1)] focus:border-[#708238]"
+                          />
+                          <span className="absolute right-4 text-xs font-display font-black text-[#3C3633] bg-[#F5F2ED] border-2 border-[#3C3633] px-2 py-0.5 rounded-lg pointer-events-none">
+                            porções
+                          </span>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Campo: Ingredientes */}
+                    <div className="space-y-1.5">
+                      <label className="text-sm font-black text-[#3C3633] block font-display tracking-wide uppercase" htmlFor="input-ingredientes">
+                        2. Quais são os ingredientes?
+                      </label>
+                      <p className="text-[11px] text-[#3C3633]/85 font-bold -mt-0.5 mb-1 bg-[#F5F2ED] p-2 rounded-xl border border-[#3C3633]/20">
+                        💡 DICA: Coloque um em cada linha apertando "Enter" no seu teclado!
+                      </p>
+                      <textarea 
+                        id="input-ingredientes"
+                        rows={4}
+                        value={newIngredientsText}
+                        onChange={(e) => setNewIngredientsText(e.target.value)}
+                        placeholder="Exemplo:&#10;3 xícaras de farinha&#10;1 xícara de açúcar&#10;3 ovos inteiros"
+                        className="w-full p-4 bg-white border-4 border-[#3C3633] rounded-2xl text-base font-bold leading-relaxed focus:border-[#708238]"
+                      />
+                    </div>
+
+                    {/* Campo: Instruções de Preparo */}
+                    <div className="space-y-1.5">
+                      <label className="text-sm font-black text-[#3C3633] block font-display tracking-wide uppercase" htmlFor="input-instrucoes">
+                        3. Como preparar o prato?
+                      </label>
+                      <p className="text-[11px] text-[#3C3633]/85 font-bold -mt-0.5 mb-1 bg-[#F5F2ED] p-2 rounded-xl border border-[#3C3633]/20">
+                        💡 DICA: Divida o texto apertando "Enter" para criar passos fáceis!
+                      </p>
+                      <textarea 
+                        id="input-instrucoes"
+                        rows={4}
+                        value={newInstructionsText}
+                        onChange={(e) => setNewInstructionsText(e.target.value)}
+                        placeholder="Exemplo:&#10;Misture todos os ingredientes no liquidificador.&#10;Asse em forno médio de 180 graus por 40 minutos."
+                        className="w-full p-4 bg-white border-4 border-[#3C3633] rounded-2xl text-base font-bold leading-relaxed focus:border-[#708238]"
+                      />
+                    </div>
+
+                    {/* Campo: Enviar Foto Real */}
+                    <div className="space-y-1.5 text-left">
+                      <label className="text-sm font-black text-[#3C3633] block font-display tracking-wide uppercase">
+                        4. Adicione uma foto real do seu prato
+                      </label>
+                      <p className="text-[11px] text-[#3C3633]/85 font-bold -mt-0.5 mb-2 bg-[#F5F2ED] p-2 rounded-xl border border-[#3C3633]/20">
+                        📸 Clique abaixo para tirar uma foto na hora com o celular ou escolher de sua galeria! Nós reduzimos o tamanho dela automaticamente para caber.
+                      </p>
+                      
+                      <div className="flex flex-col gap-3">
+                        <div className="relative border-4 border-dashed border-[#3C3633] rounded-2xl bg-white p-4 text-center cursor-pointer hover:border-[#708238] transition-colors flex flex-col items-center justify-center min-h-[140px]">
+                          <input 
+                            type="file" 
+                            accept="image/*" 
+                            onChange={handleImageChange}
+                            className="absolute inset-0 opacity-0 cursor-pointer z-20 w-full h-full"
+                            title="Escolher foto"
+                          />
+                          {newImageUrl ? (
+                            <div className="space-y-2 w-full flex flex-col items-center">
+                              <div className="w-[180px] h-[120px] rounded-xl overflow-hidden border-2 border-[#3C3633] shadow-inner relative">
+                                <img src={newImageUrl} className="w-full h-full object-cover" alt="Sua foto nova" />
+                                <button 
+                                  type="button"
+                                  onClick={(e) => { e.stopPropagation(); setNewImageUrl(""); }}
+                                  className="absolute top-1 right-1 bg-red-800 text-white border border-[#3C3633] rounded-lg px-2 py-0.5 text-[10px] font-black hover:bg-black uppercase cursor-pointer z-30"
+                                >
+                                  Remover
+                                </button>
+                              </div>
+                              <p className="text-[10px] text-green-800 font-extrabold flex items-center gap-1">
+                                <Check className="h-3 w-3 stroke-[3px]" /> FOTO CARREGADA E COMPRIMIDA COM SUCESSO!
+                              </p>
+                            </div>
+                          ) : (
+                            <div className="space-y-2 flex flex-col items-center">
+                              <div className="p-3 bg-[#F5F2ED] rounded-xl border border-[#3C3633]">
+                                <Camera className="h-6 w-6 text-[#708238]" />
+                              </div>
+                              <div>
+                                <p className="text-xs font-black text-[#3C3633]">SELECIONAR OU ENVIAR IMAGEM</p>
+                                <p className="text-[10px] text-gray-400 font-bold">Funciona no computador e celular</p>
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Campo: Publicar ou Privar */}
+                    <div className="space-y-2 text-left bg-[#FAF6EE] border-4 border-[#3C3633] rounded-[24px] p-4.5 shadow-[2px_2px_0px_0px_rgba(60,54,51,0.1)]">
+                      <label className="text-sm font-black text-[#3C3633] block font-display tracking-wide uppercase">
+                        5. Onde salvar essa receita?
+                      </label>
+                      <p className="text-[11px] text-[#3C3633]/85 font-semibold -mt-0.5 mb-2 leading-relaxed">
+                        🌎 <strong>Publicar para todos:</strong> Outras pessoas que usam o aplicativo poderão ver e fazer sua receita.
+                        <br />
+                        🔒 <strong>Privar no meu caderno:</strong> Guardado de forma segura apenas no seu caderno de receitas particular.
+                      </p>
+
+                      <div className="grid grid-cols-2 gap-3.5 pt-1">
+                        <button
+                          type="button"
+                          onClick={() => setNewIsPublic(false)}
+                          className={`py-3 px-4 rounded-xl border-2 text-xs font-black uppercase text-center cursor-pointer transition-all ${
+                            !newIsPublic
+                              ? "bg-[#ABE0A3]/20 border-[#708238] text-[#708238] ring-4 ring-[#708238]/10"
+                              : "bg-white border-[#3C3633] text-[#3C3633]"
+                          }`}
+                        >
+                          🔒 SÓ NO CADERNO
+                        </button>
+                        
+                        <button
+                          type="button"
+                          onClick={() => setNewIsPublic(true)}
+                          className={`py-3 px-4 rounded-xl border-2 text-xs font-black uppercase text-center cursor-pointer transition-all ${
+                            newIsPublic
+                              ? "bg-[#ABE0A3]/20 border-[#708238] text-[#708238] ring-4 ring-[#708238]/10"
+                              : "bg-white border-[#3C3633] text-[#3C3633]"
+                          }`}
+                        >
+                          🌎 PUBLICAR PARA TODOS
+                        </button>
+                      </div>
+                    </div>
+
+                    {/* Botão de Enviar gigante */}
+                    {formFeedback && (
+                      <div className="bg-[#FFEBE6] border-4 border-[#3C3633] p-4 rounded-2xl text-red-800 text-xs font-black flex items-center gap-2 shadow-[3px_3px_0px_0px_rgba(60,54,51,1)] animate-fadeIn">
+                        <span className="bg-red-800 text-white w-5 h-5 rounded-full flex items-center justify-center font-black">!</span>
+                        <span>{formFeedback}</span>
+                      </div>
+                    )}
+
+                    <button 
+                      id="btn-submeter"
+                      type="submit"
+                      className="w-full py-4 bg-[#708238] hover:bg-[#5C6E2C] active:bg-[#3C3633] text-white text-lg font-black rounded-2xl shadow-[4px_4px_0px_0px_rgba(60,54,51,1)] border-4 border-[#3C3633] transition-all active:translate-x-0.5 active:translate-y-0.5 active:shadow-none cursor-pointer flex items-center justify-center gap-2 uppercase tracking-wide font-display"
+                    >
+                      <span>💾 GUARDAR RECEITA COM AMOR</span>
+                    </button>
+                  </form>
+                </div>
+              )}
+
+              {/* TELA 3: MEU CADERNO / MINHAS RECEITAS */}
+              {activeTab === "minhas_receitas" && (
+                <div className="space-y-4" id="my-recipes-tab">
+                  {/* Banner superior */}
+                  <div className="bg-[#F5F2ED] border-4 border-[#3C3633] p-5 rounded-[28px] text-center space-y-2 shadow-[4px_4px_0px_0px_rgba(60,54,51,1)]">
+                    <span className="text-xs font-black uppercase bg-[#708238] text-white border-2 border-[#3C3633] px-3.5 py-1 rounded-full inline-block shadow-[2px_2px_0px_0px_rgba(60,54,51,1)]">
+                      Meu Estojo Particular
+                    </span>
+                    <h2 className="text-xl font-display font-black text-[#3C3633]">
+                      Meu Caderno Favorito
+                    </h2>
+                    <p className="text-xs text-[#3C3633] font-bold leading-relaxed">
+                      Aqui ficam salvas as receitas que você escreveu e as do aplicativo que você marcou com coração!
+                    </p>
+                  </div>
+
+                  {mySavedRecipes.length === 0 ? (
+                    /* Caderno vazio com instruções com setas confortáveis */
+                    <div className="bg-white border-4 border-dashed border-[#3C3633] p-8 rounded-[32px] text-center space-y-4" id="empty-notebook-directions">
+                      <div className="w-16 h-16 bg-[#F5F2ED] rounded-xl flex items-center justify-center mx-auto border-2 border-[#3C3633] shadow-[3px_3px_0px_0px_rgba(60,54,51,1)]">
+                        <BookMarked className="h-8 w-8 text-[#708238]" />
+                      </div>
+                      <div className="space-y-1">
+                        <p className="text-base text-[#3C3633] font-black uppercase font-display">
+                          Seu Caderno está limpo!
+                        </p>
+                        <p className="text-xs text-gray-500 font-bold leading-relaxed max-w-xs mx-auto">
+                          Dica fácil: Escreva e guarde sua primeira receita clicando no botão circular de Criar Receita.
+                        </p>
+                      </div>
+                      
+                      {/* Seta animada visual apontando para baixo para ajudar idosos no visual */}
+                      <div className="text-[#708238] flex flex-col items-center animate-bounce pt-2">
+                        <span className="text-[10px] font-black tracking-widest uppercase mb-1">Toque aqui embaixo</span>
+                        <span className="text-2xl">👇</span>
+                      </div>
+                    </div>
+                  ) : (
+                    /* Lista de Favoritos e Customizados */
+                    <div className="space-y-4">
+                      <h4 className="text-xs font-black uppercase text-gray-500 tracking-wider">
+                        Tenho {mySavedRecipes.length} receita(s) guardadas:
+                      </h4>
+                      
+                      <div className="space-y-4">
+                        {mySavedRecipes.map((recipe) => (
+                          <div
+                            id={`my-recipe-card-${recipe.id}`}
+                            key={recipe.id}
+                            onClick={() => setSelectedRecipe(recipe)}
+                            className="w-full bg-white border-4 border-[#3C3633] p-5 rounded-[28px] hover:border-[#708238] cursor-pointer shadow-[4px_4px_0px_0px_rgba(60,54,51,1)] flex flex-col relative overflow-hidden animate-none"
+                          >
+                            {/* Badges de Destaque */}
+                            {!recipe.isPreset ? (
+                              <span className="absolute top-0 right-0 bg-[#C18C5D] text-white text-[9px] font-black px-3.5 py-1 rounded-bl-xl uppercase tracking-wider border-l border-b border-[#3C3633]/30">
+                                Criação Minha
+                              </span>
+                            ) : (
+                              <span className="absolute top-0 right-0 bg-[#A0352A] text-white text-[9px] font-black px-3.5 py-1 rounded-bl-xl uppercase tracking-wider border-l border-b border-[#3C3633]/30">
+                                Favorita ❤️
+                              </span>
+                            )}
+
+                            <div>
+                              <span className="text-[10px] bg-[#F5F2ED] border-2 border-[#3C3633] text-[#3C3633] font-black px-2.5 py-1 rounded-lg uppercase inline-block">
+                                {recipe.category}
+                              </span>
+                              {!recipe.isPreset && (
+                                <span className={`text-[10px] ml-1.5 border-2 border-[#3C3633] font-black px-2 py-1 rounded-lg uppercase inline-block ${recipe.isPublic !== false ? 'bg-[#E6EDDF] text-[#708238]' : 'bg-[#FFEBE6] text-red-800'}`}>
+                                  {recipe.isPublic !== false ? "🌍 Pública" : "🔒 Privada"}
+                                </span>
+                              )}
+                              <h4 className="text-lg font-display font-black text-[#3C3633] mt-2 line-clamp-1">
+                                {recipe.title}
+                              </h4>
+                            </div>
+
+                            <p className="text-xs text-gray-500 font-bold mt-1.5 line-clamp-2 leading-relaxed">
+                              {recipe.description}
+                            </p>
+
+                            <div className="flex justify-between items-center mt-4 pt-3 border-t-2 border-[#F5F2ED]">
+                              <div className="flex gap-3 text-xs text-gray-500 font-bold">
+                                <span className="flex items-center gap-1 font-black">
+                                  <Clock className="h-4 w-4 text-[#708238] stroke-[2.5px]" />
+                                  {recipe.prepTime}
+                                </span>
+                              </div>
+                              
+                              <div className="flex gap-1.5 items-center">
+                                {/* Botão para deletar/remover diretamente */}
+                                <button
+                                  id={`btn-inline-delete-${recipe.id}`}
+                                  onClick={(e) => handleDeleteCustomRecipe(recipe.id, e)}
+                                  className="py-2 px-3.5 bg-[#FFEBE6] border-2 border-[#FFA3A3] text-red-800 hover:bg-red-50 rounded-xl cursor-pointer text-xs font-black flex items-center justify-center gap-1 active:scale-95 transition-transform"
+                                  title="Remover do Caderno"
+                                >
+                                  <Trash2 className="h-4 w-4 text-red-600 shrink-0" />
+                                  <span>Apagar</span>
+                                </button>
+                                <span className="text-xs font-black text-white bg-[#708238] border-2 border-[#3C3633] px-3.5 py-1.5 rounded-xl shadow-[2px_2px_0px_0px_rgba(60,54,51,1)]">
+                                  ABRIR
+                                </span>
+                              </div>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
+
+        </div>
+
+        {/* --- BARRA DE NAVEGAÇÃO INFERIOR FIXA (BOTTOM BAR) --- */}
+        <div className="absolute bottom-0 left-0 right-0 bg-white border-t-4 border-[#708238] py-2 px-8 flex justify-between items-center z-20 h-[105px]">
+          
+          {/* Lado Esquerdo: Ver Receitas */}
+          <button 
+            id="nav-btn-ver-receitas"
+            onClick={() => {
+              setActiveTab("ver_receitas");
+              setSelectedRecipe(null);
+              setSelectedCategory(null);
+            }}
+            className="flex flex-col items-center justify-center w-20 h-16 active:scale-95 transition-transform cursor-pointer"
+          >
+            <div className={`w-12 h-12 rounded-xl flex items-center justify-center border-2 transition-all ${activeTab === "ver_receitas" ? "bg-[#708238]/15 border-[#708238] shadow-[2px_2px_0px_0px_rgba(112,130,56,1)]" : "bg-[#3C3633]/5 border-[#3c3633]/30 opacity-60"}`}>
+              <BookOpen className={`h-6 w-6 stroke-[3px] ${activeTab === "ver_receitas" ? "text-[#708238]" : "text-[#3C3633]"}`} />
+            </div>
+            <span className={`text-[11px] font-black mt-1 uppercase tracking-wider ${activeTab === "ver_receitas" ? "text-[#708238]" : "text-[#3C3633]/60"}`}>
+              Receitas
+            </span>
+          </button>
+
+          {/* Centro: O BOTÃO REDONDO DESTAQUE "Criar Receita" */}
+          {/* Fica ressaltado de forma icônica, com texto claro e bordas Bento */}
+          <div className="absolute left-1/2 transform -translate-x-1/2 -top-6 flex flex-col items-center">
+            <button 
+              id="nav-btn-criar"
+              onClick={() => {
+                setActiveTab("criar_receita");
+                setSelectedRecipe(null);
+                setSelectedCategory(null);
+                setFormFeedback(null);
+              }}
+              className="w-[72px] h-[72px] rounded-full bg-[#708238] border-3 border-[#FDFBF7] shadow-xl hover:bg-[#5C6E2C] active:scale-90 transition-transform flex flex-col items-center justify-center text-white ring-4 ring-[#708238] cursor-pointer"
+              title="Adicionar ou Escrever Nova Receita"
+            >
+              <Plus className="h-7 w-7 stroke-[4.5px]" />
+              <span className="text-[10px] font-black text-white leading-tight uppercase tracking-wider">
+                Criar
+              </span>
+            </button>
+            <span className="mt-1 text-[11px] font-black uppercase text-[#708238] tracking-widest leading-none">
+              CRIAR RECEITA
+            </span>
+          </div>
+
+          {/* Spacer virtual no grid para compensar o botão central absoluto */}
+          <div className="w-16"></div>
+
+          {/* Lado Direito: Favoritos / Caderno */}
+          <button 
+            id="nav-btn-minhas"
+            onClick={() => {
+              setActiveTab("minhas_receitas");
+              setSelectedRecipe(null);
+              setSelectedCategory(null);
+            }}
+            className="flex flex-col items-center justify-center w-20 h-16 active:scale-95 transition-transform cursor-pointer"
+          >
+            <div className={`w-12 h-12 rounded-xl flex items-center justify-center border-2 transition-all relative ${activeTab === "minhas_receitas" ? "bg-[#708238]/15 border-[#708238] shadow-[2px_2px_0px_0px_rgba(112,130,56,1)]" : "bg-[#3C3633]/5 border-[#3c3633]/30 opacity-60"}`}>
+              <Heart className={`h-6 w-6 stroke-[3px] ${activeTab === "minhas_receitas" ? "text-red-700" : "text-[#3C3633]"}`} />
+              {mySavedRecipes.length > 0 && (
+                <span className="absolute -top-1.5 -right-1.5 bg-[#A0352A] border border-[#3C3633] text-white text-[9px] font-black rounded-full w-5 h-5 flex items-center justify-center shadow-sm">
+                  {mySavedRecipes.length}
+                </span>
+              )}
+            </div>
+            <span className={`text-[11px] font-black mt-1 uppercase tracking-wider ${activeTab === "minhas_receitas" ? "text-[#708238]" : "text-[#3C3633]/60"}`}>
+              Caderno
+            </span>
+          </button>
+
+        </div>
+
+      </div>
+
+      {recipeToDelete && (
+        <div className="fixed inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4 z-50">
+          <div className="bg-white border-4 border-[#3C3633] rounded-[32px] max-w-sm w-full p-6 text-center space-y-4 shadow-[8px_8px_0px_0px_rgba(60,54,51,1)] animate-fadeIn">
+            <div className="w-16 h-16 bg-[#FFEBE6] border-4 border-[#3C3633] rounded-full flex items-center justify-center mx-auto text-3xl">
+              ⚠️
+            </div>
+            
+            <div className="space-y-2">
+              <h3 className="font-display font-black text-lg text-[#3C3633] uppercase">
+                {recipes.find(r => r.id === recipeToDelete)?.isPreset ? "Remover Favorito?" : currentUser?.isAdmin && recipes.find(r => r.id === recipeToDelete)?.authorId !== currentUser?.uid ? "Excluir como Admin?" : "Confirmar Exclusão?"}
+              </h3>
+              <p className="text-sm text-gray-600 font-bold leading-relaxed">
+                {recipes.find(r => r.id === recipeToDelete)?.isPreset 
+                  ? "Você quer mesmo tirar essa receita do seu caderno de favoritos? Ela continuará guardada na lista de pratos geral." 
+                  : currentUser?.isAdmin && recipes.find(r => r.id === recipeToDelete)?.authorId !== currentUser?.uid
+                    ? "Você tem permissões de Administrador (Vovó Admin). Tem certeza de que quer apagar definitivamente esta receita do sistema? Essa ação não pode ser desfeita!"
+                    : "Você tem certeza de que deseja apagar essa receita criada por você? Essa ação não pode ser desfeita!"}
+              </p>
+            </div>
+
+            <div className="grid grid-cols-2 gap-3 pt-2">
+              <button
+                onClick={() => setRecipeToDelete(null)}
+                className="py-3 px-4 bg-[#F5F2ED] border-4 border-[#3C3633] hover:bg-[#E8E6E1] text-[#3C3633] rounded-2xl text-xs font-black uppercase shadow-[2px_2px_0px_0px_rgba(60,54,51,1)] active:scale-95 transition-all cursor-pointer"
+              >
+                Não, voltar
+              </button>
+              <button
+                onClick={() => {
+                  if (recipeToDelete) {
+                    confirmDeleteRecipe(recipeToDelete);
+                    setRecipeToDelete(null);
+                  }
+                }}
+                className="py-3 px-4 bg-[#A0352A] hover:bg-[#8D2D23] text-white border-4 border-[#3C3633] rounded-2xl text-xs font-black uppercase shadow-[2px_2px_0px_0px_rgba(60,54,51,1)] active:scale-95 transition-all cursor-pointer"
+              >
+                Sim, apagar
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {isAuthModalOpen && (
+        <div className="fixed inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4 z-50 animate-fadeIn">
+          <div className="bg-[#FDFBF7] border-4 border-[#3C3633] rounded-[36px] max-w-sm w-full p-6 space-y-4 shadow-[10px_10px_0px_0px_rgba(60,54,51,1)] text-center relative max-h-[90vh] overflow-y-auto">
+            
+            {/* Fechar modal */}
+            <button
+              onClick={() => setIsAuthModalOpen(false)}
+              className="absolute top-4 right-4 text-gray-400 hover:text-black font-black text-lg p-1.5 focus:outline-none transition-transform active:scale-90"
+              title="Fechar"
+            >
+              ✕
+            </button>
+
+            {currentUser ? (
+              // Modo Logado
+              <div className="space-y-4 pt-2">
+                <div className="w-20 h-20 bg-[#FFDE4D] border-3 border-[#3C3633] rounded-full flex items-center justify-center mx-auto text-4xl shadow-[3px_3px_0px_0px_rgba(60,54,51,1)]">
+                  {currentUser.isAdmin ? "👑" : "🍳"}
+                </div>
+                
+                <div className="space-y-1">
+                  <h3 className="font-display font-black text-xl text-[#3C3633] uppercase">
+                    Seu Perfil
+                  </h3>
+                  <div className="bg-[#708238]/10 border-2 border-[#708238]/20 rounded-2xl p-3.5 space-y-1 text-left">
+                    <p className="text-sm font-black text-[#708238]">
+                      Nome: {currentUser.name}
+                    </p>
+                    <p className="text-xs font-bold text-gray-500">
+                      E-mail: {currentUser.email}
+                    </p>
+                    {currentUser.isAdmin && (
+                      <span className="inline-block bg-[#FFDE4D] text-[#3C3633] border border-[#3C3633] font-black text-[9px] px-2 py-0.5 rounded-md uppercase mt-1">
+                        Conta Administrador ⭐
+                      </span>
+                    )}
+                  </div>
+                </div>
+
+                <p className="text-xs font-bold text-gray-500 leading-relaxed text-left">
+                  {currentUser.isAdmin 
+                    ? "Logado como administrador Luiz Gustavo. Você possui permissão para apagar receitas públicas compartilhadas e excluir comentários indesejados." 
+                    : "Suas novas receitas criadas serão marcadas com o seu e-mail!"}
+                </p>
+
+                <div className="space-y-2 pt-2">
+                  <button
+                    type="button"
+                    onClick={handleLogout}
+                    className="w-full py-3 bg-[#A0352A] hover:bg-[#8D2D23] text-white border-2 border-[#3C3633] shadow-[3px_3px_0px_0px_rgba(60,54,51,1)] rounded-2xl text-xs font-black uppercase active:scale-95 transition-all cursor-pointer"
+                  >
+                    Sair da minha Conta 👋
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setIsAuthModalOpen(false)}
+                    className="w-full py-2.5 bg-[#F5F2ED] border-2 border-[#3C3633] hover:bg-[#E8E6E1] text-[#3C3633] rounded-2xl text-xs font-black uppercase shadow-[3px_3px_0px_0px_rgba(60,54,51,1)] active:scale-95 transition-all cursor-pointer"
+                  >
+                    Voltar para as receitas
+                  </button>
+                </div>
+              </div>
+            ) : (
+              // Formulário de Cadastro / Login
+              <div className="space-y-4 pt-2">
+                <div className="w-16 h-16 bg-[#FFDE4D] border-3 border-[#3C3633] rounded-full flex items-center justify-center mx-auto text-3xl shadow-[3px_3px_0px_0px_rgba(60,54,51,1)]">
+                  🔑
+                </div>
+
+                <div className="space-y-1">
+                  <h3 className="font-display font-black text-lg text-[#3C3633] uppercase">
+                    Acessar Caderno de Receitas
+                  </h3>
+                  <p className="text-xs text-gray-500 font-bold leading-relaxed max-w-xs mx-auto">
+                    Insira uma conta do Google com sua senha para registrar. Você também pode entrar sem conta!
+                  </p>
+                </div>
+
+                {/* Alternador de abas interna no modal */}
+                <div className="grid grid-cols-2 bg-[#F5F2ED] border-2 border-[#3C3633] p-1 rounded-xl">
+                  <button
+                    type="button"
+                    onClick={() => { setAuthMode("login"); setAuthFeedback(null); }}
+                    className={`py-2 text-[10px] font-black uppercase rounded-lg transition-all cursor-pointer ${authMode === "login" ? "bg-[#708238] text-white" : "text-[#3C3633]/60"}`}
+                  >
+                    Entrar
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => { setAuthMode("register"); setAuthFeedback(null); }}
+                    className={`py-2 text-[10px] font-black uppercase rounded-lg transition-all cursor-pointer ${authMode === "register" ? "bg-[#708238] text-white" : "text-[#3C3633]/60"}`}
+                  >
+                    Criar Conta
+                  </button>
+                </div>
+
+                {/* Botão de Login com Google simplificado */}
+                <button
+                  type="button"
+                  onClick={handleGoogleSignIn}
+                  className="w-full py-2.5 bg-white border-2 border-[#3C3633] hover:bg-gray-50 text-[#3C3633] rounded-2xl text-[11px] font-black uppercase shadow-[3px_3px_0px_0px_rgba(60,54,51,1)] cursor-pointer active:scale-95 transition-all flex items-center justify-center gap-2"
+                >
+                  <svg className="w-4 h-4" viewBox="0 0 24 24">
+                    <path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/>
+                    <path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/>
+                    <path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.06H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.94l2.85-2.22.81-.63z"/>
+                    <path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.06l3.66 2.84c.87-2.6 3.3-4.52 6.16-4.52z"/>
+                  </svg>
+                  Entrar com Conta Google 🌐
+                </button>
+
+                <div className="flex items-center my-2 select-none">
+                  <div className="flex-grow border-t-2 border-[#3C3633]/15"></div>
+                  <span className="mx-3 text-[9px] font-black uppercase text-[#3C3633]/40">ou usar e-mail</span>
+                  <div className="flex-grow border-t-2 border-[#3C3633]/15"></div>
+                </div>
+
+                <form onSubmit={handleAuthSubmit} className="space-y-3.5 text-left">
+                  {authMode === "register" && (
+                    <div className="space-y-1">
+                      <label className="text-[10px] font-black text-[#3C3633] uppercase tracking-wide block">
+                        Seu Nome ou Apelido:
+                      </label>
+                      <input
+                        type="text"
+                        value={authName}
+                        onChange={(e) => setAuthName(e.target.value)}
+                        placeholder="Ex: Luiz Gustavo"
+                        className="w-full text-xs font-bold p-2.5 bg-white border-2 border-[#3C3633] rounded-xl focus:outline-none placeholder-gray-400 font-sans"
+                        maxLength={40}
+                      />
+                    </div>
+                  )}
+
+                  <div className="space-y-1">
+                    <label className="text-[10px] font-black text-[#3C3633] uppercase tracking-wide block">
+                      E-mail do Google (Conta):
+                    </label>
+                    <input
+                      type="email"
+                      value={authEmail}
+                      onChange={(e) => setAuthEmail(e.target.value)}
+                      placeholder="seu_email@gmail.com"
+                      className="w-full text-xs font-bold p-2.5 bg-white border-2 border-[#3C3633] rounded-xl focus:outline-none placeholder-gray-400 font-sans"
+                      required
+                    />
+                  </div>
+
+                  <div className="space-y-1">
+                    <label className="text-[10px] font-black text-[#3C3633] uppercase tracking-wide block">
+                      Senha de Acesso:
+                    </label>
+                    <input
+                      type="password"
+                      value={authPassword}
+                      onChange={(e) => setAuthPassword(e.target.value)}
+                      placeholder="Digite sua senha..."
+                      className="w-full text-xs font-bold p-2.5 bg-white border-2 border-[#3C3633] rounded-xl focus:outline-none placeholder-gray-400 font-sans"
+                      required
+                    />
+                  </div>
+
+                  {authFeedback && (
+                    <div className="bg-[#FFEBE6] border-2 border-red-300 rounded-xl p-2.5 text-[11px] font-bold text-red-800 text-center uppercase tracking-wide leading-tight">
+                      ⚠️ {authFeedback}
+                    </div>
+                  )}
+
+                  <div className="pt-2">
+                    <button
+                      type="submit"
+                      className="w-full py-3 bg-[#708238] hover:bg-[#5C6E2C] text-white border-2 border-[#3C3633] rounded-2xl text-xs font-black uppercase shadow-[3px_3px_0px_0px_rgba(60,54,51,1)] cursor-pointer active:scale-95 transition-transform"
+                    >
+                      {authMode === "login" ? "Confirmar e Entrar 🔑" : "Cadastrar Conta 🍳"}
+                    </button>
+                  </div>
+                </form>
+
+                <div className="pt-2 border-t border-dashed border-gray-200">
+                  <button
+                    type="button"
+                    onClick={() => setIsAuthModalOpen(false)}
+                    className="w-full py-2 bg-transparent text-[#708238] hover:text-[#5C6E2C] text-xs font-extrabold uppercase tracking-wider transition-all cursor-pointer"
+                  >
+                    Continuar como Visitante ➔
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}

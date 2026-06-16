@@ -1,0 +1,6 @@
+{
+  "name": "Receitas de Casa",
+  "description": "Uma plataforma de receitas acolhedora e acessível, projetada com carinho para a terceira idade.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
