@@ -161,5 +161,93 @@ export const PRESET_RECIPES: Recipe[] = [
       "Polvilhe bastante canela em pó por cima antes de servir. Pode ser consumido quentinho ou gelado!"
     ],
     isPreset: true
+  },
+  {
+    id: "pao-de-queijo",
+    title: "Pão de Queijo Mineiro Crocante",
+    category: "Chás e Receitas de Vó",
+    description: "O verdadeiro pão de queijo com casquinha crocante por fora e textura super macia por dentro. Fica perfeito feito na hora!",
+    prepTime: "30 minutos",
+    portions: "20 unidades",
+    imageUrl: "https://images.unsplash.com/photo-1590080875515-8a3a8dc5735e?auto=format&fit=crop&q=80&w=600",
+    rating: 4.9,
+    ratingsCount: 51,
+    ingredients: [
+      "500g de polvilho doce ou azedo de boa qualidade",
+      "1 xícara (chá) de leite integral morno",
+      "1/2 xícara (chá) de óleo de cozinha limpo",
+      "1/2 xícara (chá) de água filtrada morna",
+      "2 ovos de galinha caipira grandes",
+      "150g de queijo meia cura mineiro ou parmesão ralado",
+      "1 colher (chá) de sal bem medido"
+    ],
+    instructions: [
+      "Aqueça em uma panela pequena o leite, a água, o óleo e o sal até levantar fervura completa.",
+      "Em uma tigela funda grande, adicione o polvilho doce ou azedo e despeje o líquido fervente com muito cuidado para escaldar.",
+      "Mexa bem com uma colher de silicone até que a massa fique morna e em temperatura confortável para amassar.",
+      "Adicione os ovos um a um e o parmesão ralado amassando fartamente com as mãos até formar uma textura lisa e que desgrude.",
+      "Faça bolinhas redondas e uniformes de tamanho médio e acomode-as em uma fôrma limpa, deixando espaço entre elas.",
+      "Asse em forno quente preaquecido a 200°C por cerca de 20 minutos até que fiquem douradinhos e sirva imediatamente com café quentinho!"
+    ],
+    isPreset: true
+  },
+  {
+    id: "bolinho-chuva",
+    title: "Bolinho de Chuva da Vovó Clássico",
+    category: "Chás e Receitas de Vó",
+    description: "Super macio, sequinho e aromatizado com canela. A receita tradicional que traz de volta as memórias de tardes chuvosas na cozinha da vovó.",
+    prepTime: "20 minutos",
+    portions: "15 bolinhos",
+    imageUrl: "https://images.unsplash.com/photo-1557308536-ee409787b18e?auto=format&fit=crop&q=80&w=600",
+    rating: 4.8,
+    ratingsCount: 33,
+    ingredients: [
+      "2 ovos de granja inteiros batidos",
+      "1/2 xícara (chá) de açúcar demerara ou refinado",
+      "1 xícara (chá) de leite integral morno",
+      "2 e 1/2 xícaras de farinha de trigo peneirada",
+      "1 colher (sopa) de fermento químico para bolo",
+      "Óleo abundante para fritura em panela funda",
+      "Açúcar refinado e canela em pó misturados para empanar no final"
+    ],
+    instructions: [
+      "Em um recipiente fundo grande, misture bem os ovos e o açúcar com um batedor de arame até espumar.",
+      "Adicione o leite e vá juntando a farinha peneirada aos poucos, mexendo sem parar até obter uma consistência pastosa encorpada.",
+      "Por último, misture o fermento delicadamente em movimentos suaves de baixo para cima.",
+      "Aqueça bem uma panela com bastante óleo, mantendo depois o fogo médio para os bolinhos não ficarem crus no miolo.",
+      "Com o auxílio de duas colheres de sopa, pingue pequenas porções de massa diretamente no óleo quente.",
+      "Frite até que fiquem lindamente dourados de todos os lados, escorra em papel toalha e passe na canela com açúcar."
+    ],
+    isPreset: true
+  },
+  {
+    id: "lasanha",
+    title: "Lasanha de Carne Suprema da Vovó",
+    category: "Almoço de Domingo",
+    description: "Uma lasanha maravilhosa, montada em camadas generosas de carne moída bem temperada, queijo cremoso derretido e carinho de vó.",
+    prepTime: "50 minutos",
+    portions: "10 porções",
+    imageUrl: "https://images.unsplash.com/photo-1574894709920-11b28e7367e3?auto=format&fit=crop&q=80&w=600",
+    rating: 5.0,
+    ratingsCount: 64,
+    ingredients: [
+      "500g de massa de lasanha pré-cozida ou de sua preferência",
+      "500g de carne moída de patinho bem limpinha",
+      "2 sachês de molho de tomate encorpado e aromático",
+      "1 cebola de cabeça grande e 3 dentes de alho picadinhos",
+      "400g de queijo mussarela fresco fatiado",
+      "300g de presunto cozido fatiado fininho",
+      "Queijo parmesão de boa qualidade ralado para gratinar",
+      "Sal do Himalaia ou marinho, pimenta-do-reino e folhinhas de manjericão fresco a gosto"
+    ],
+    instructions: [
+      "Em uma panela grande, aqueça um fio de bife de azeite e doure as cebolas e o alho picados com muito amor e carinho.",
+      "Junte a carne moída, mexendo até que fique bem douradinha, adicionando o sal, pimenta e os sachês de molho de tomate para cozinhar por 15 minutos.",
+      "Separe um refratário retangular grande e espalhe uma camada fina de molho com carne moída no fundo.",
+      "Intercale as camadas posicionando massa de lasanha pré-cozida, molho bolonhesa encorpado, fatias de presunto e fatias de mussarela.",
+      "Finalize cobrindo com o restante do queijo mussarela e uma generosa dose de queijo parmesão ralado por cima.",
+      "Leve ao forno preaquecido a 180°C por cerca de 20 minutos até ferver e o queijo dourar. Adicione manjericão fresco e sirva fumegante!"
+    ],
+    isPreset: true
   }
 ];

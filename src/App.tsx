@@ -21,6 +21,7 @@ import {
   Image as ImageIcon
 } from "lucide-react";
 import { PRESET_RECIPES, Recipe } from "./data/presetRecipes";
+import vovoAvatar from "./assets/images/vovo_avatar_1781440678195.jpg";
 import { 
   auth, 
   db, 
@@ -136,8 +137,115 @@ export default function App() {
   ];
 
   // --- SYNC COM REAL-TIME FIREBASE ---
+  // Sincronizar em tempo real para TODOS os usuários (com ou sem conta) verem receitas e comentários
   useEffect(() => {
+    // 1. Sincronizar receitas em tempo real para todos (com ou sem conta logada)
+    const unsubscribeRecipes = onSnapshot(collection(db, "recipes"), (snapshot) => {
+      const remoteRecipes: Recipe[] = [];
+      snapshot.forEach((doc) => {
+        const data = doc.data();
+        remoteRecipes.push({
+          id: doc.id,
+          title: data.title,
+          category: data.category,
+          description: data.description || "Receita caseira escrita com muito afeto no aplicativo.",
+          prepTime: data.prepTime,
+          portions: data.portions,
+          ingredients: data.ingredients || [],
+          instructions: data.instructions || [],
+          isPreset: false,
+          imageUrl: data.imageUrl,
+          rating: data.rating || 5,
+          ratingsCount: data.ratingsCount || 1,
+          isPublic: data.isPublic !== false,
+          userEmail: data.userEmail || data.email,
+          authorId: data.authorId,
+          authorName: data.authorName || "Cozinheiro"
+        });
+      });
+      setRecipes([...PRESET_RECIPES, ...remoteRecipes]);
+    }, (err) => {
+      console.warn("Receitas offline ou falha de conexão com Firebase. Usando armazenado localmente:", err);
+    });
+
+    // 2. Sincronizar comentários em tempo real para todos (com ou sem conta logada)
+    const unsubscribeComments = onSnapshot(collection(db, "comments"), (snapshot) => {
+      const groupedComments: { [recipeId: string]: RecipeComment[] } = {};
+
+      // Carregar os comentários locais primeiro como base
+      let localComments: { [recipeId: string]: RecipeComment[] } = {};
+      const savedComments = localStorage.getItem("receitas_casa_comentarios");
+      if (savedComments) {
+        try {
+          localComments = JSON.parse(savedComments);
+        } catch (_) {}
+      }
+
+      // Preencher inicialmente com os comentários locais
+      Object.keys(localComments).forEach((rId) => {
+        groupedComments[rId] = [...localComments[rId]];
+      });
+
+      // Mesclar e sobrescrever com os comentários oficiais do Firestore
+      snapshot.forEach((doc) => {
+        const d = doc.data();
+        if (!d.recipeId) return;
+
+        const c: RecipeComment = {
+          id: doc.id,
+          author: d.author || "Cozinheiro",
+          text: d.text || "",
+          timestamp: d.timestamp || "",
+          userEmail: d.userEmail,
+          recipeId: d.recipeId
+        };
+
+        if (!groupedComments[d.recipeId]) {
+          groupedComments[d.recipeId] = [];
+        }
+
+        const existingIdx = groupedComments[d.recipeId].findIndex(item => item.id === doc.id);
+        if (existingIdx !== -1) {
+          groupedComments[d.recipeId][existingIdx] = c;
+        } else {
+          groupedComments[d.recipeId].push(c);
+        }
+      });
+
+      // Ordenar os comentários de cada receita em ordem decrescente de tempo (mais recentes no topo)
+      Object.keys(groupedComments).forEach((rId) => {
+        groupedComments[rId].sort((a, b) => {
+          const timeA = a.id.startsWith("comment-") ? parseInt(a.id.replace("comment-", ""), 10) : 0;
+          const timeB = b.id.startsWith("comment-") ? parseInt(b.id.replace("comment-", ""), 10) : 0;
+          if (timeA && timeB) {
+            return timeB - timeA;
+          }
+          return b.id.localeCompare(a.id);
+        });
+      });
+
+      setComments(groupedComments);
+    }, (err) => {
+      console.warn("Comentários offline ou sem conexão com Firebase:", err);
+    });
+
+    return () => {
+      unsubscribeRecipes();
+      unsubscribeComments();
+    };
+  }, []);
+
+  // Sincronizar dados do usuário e favoritos correspondentes
+  useEffect(() => {
+    let unsubscribeFavs: (() => void) | null = null;
+
     const unsubscribeAuth = onAuthStateChanged(auth, async (firebaseUser) => {
+      // Limpar assinatura anterior ao trocar de conta
+      if (unsubscribeFavs) {
+        unsubscribeFavs();
+        unsubscribeFavs = null;
+      }
+
       if (firebaseUser) {
         // Logado via Firebase Auth!
         const emailLower = firebaseUser.email?.trim().toLowerCase() || "";
@@ -173,61 +281,9 @@ export default function App() {
           isAdmin: isAdminFlag
         });
 
-        // 1. Sincronizar receitas em tempo real
-        const unsubscribeRecipes = onSnapshot(collection(db, "recipes"), (snapshot) => {
-          const remoteRecipes: Recipe[] = [];
-          snapshot.forEach((doc) => {
-            const data = doc.data();
-            remoteRecipes.push({
-              id: doc.id,
-              title: data.title,
-              category: data.category,
-              description: data.description || "Receita caseira escrita com muito afeto no aplicativo.",
-              prepTime: data.prepTime,
-              portions: data.portions,
-              ingredients: data.ingredients || [],
-              instructions: data.instructions || [],
-              isPreset: false,
-              imageUrl: data.imageUrl,
-              rating: data.rating || 5,
-              ratingsCount: data.ratingsCount || 1,
-              isPublic: data.isPublic !== false,
-              userEmail: data.userEmail || data.email,
-              authorId: data.authorId,
-              authorName: data.authorName || "Cozinheiro"
-            });
-          });
-          setRecipes([...PRESET_RECIPES, ...remoteRecipes]);
-        }, (err) => {
-          handleFirestoreError(err, OperationType.LIST, "recipes");
-        });
-
-        // 2. Sincronizar comentários em tempo real
-        const unsubscribeComments = onSnapshot(collection(db, "comments"), (snapshot) => {
-          const groupedComments: { [recipeId: string]: RecipeComment[] } = {};
-          snapshot.forEach((doc) => {
-            const d = doc.data();
-            const c: RecipeComment = {
-              id: doc.id,
-              author: d.author || "Cozinheiro",
-              text: d.text || "",
-              timestamp: d.timestamp || "",
-              userEmail: d.userEmail,
-              recipeId: d.recipeId
-            };
-            if (!groupedComments[d.recipeId]) {
-              groupedComments[d.recipeId] = [];
-            }
-            groupedComments[d.recipeId].push(c);
-          });
-          setComments(groupedComments);
-        }, (err) => {
-          handleFirestoreError(err, OperationType.LIST, "comments");
-        });
-
-        // 3. Sincronizar favoritos em tempo real para este usuário
+        // Sincronizar favoritos em tempo real para este usuário logado
         const favsQuery = query(collection(db, "favorites"), where("userId", "==", userUid));
-        const unsubscribeFavs = onSnapshot(favsQuery, (snapshot) => {
+        unsubscribeFavs = onSnapshot(favsQuery, (snapshot) => {
           const favList: string[] = [];
           snapshot.forEach((doc) => {
             favList.push(doc.data().recipeId);
@@ -237,32 +293,10 @@ export default function App() {
           handleFirestoreError(err, OperationType.LIST, "favorites");
         });
 
-        return () => {
-          unsubscribeRecipes();
-          unsubscribeComments();
-          unsubscribeFavs();
-        };
       } else {
         // Visitante offline/local sem login do Firebase
         setCurrentUser(null);
         
-        // Carrega as receitas customizadas do localStorage
-        const savedCustomRecipes = localStorage.getItem("receitas_casa_custom");
-        if (savedCustomRecipes) {
-          try {
-            const parsed = JSON.parse(savedCustomRecipes);
-            if (Array.isArray(parsed)) {
-              setRecipes([...PRESET_RECIPES, ...parsed]);
-            } else {
-              setRecipes(PRESET_RECIPES);
-            }
-          } catch (_) {
-            setRecipes(PRESET_RECIPES);
-          }
-        } else {
-          setRecipes(PRESET_RECIPES);
-        }
-
         // Carrega favoritos locais
         const savedFavorites = localStorage.getItem("receitas_casa_favoritos");
         if (savedFavorites) {
@@ -272,19 +306,54 @@ export default function App() {
               setFavorites(parsed);
             }
           } catch (_) {}
-        }
-
-        // Carrega comentários locais
-        const savedComments = localStorage.getItem("receitas_casa_comentarios");
-        if (savedComments) {
-          try {
-            setComments(JSON.parse(savedComments));
-          } catch (_) {}
+        } else {
+          setFavorites([]);
         }
       }
     });
 
-    return () => unsubscribeAuth();
+    return () => {
+      unsubscribeAuth();
+      if (unsubscribeFavs) {
+        unsubscribeFavs();
+      }
+    };
+  }, []);
+
+  // Carregar cache local do localStorage uma única vez na inicialização
+  useEffect(() => {
+    // Carrega as receitas customizadas locais como fallback complementar
+    const savedCustomRecipes = localStorage.getItem("receitas_casa_custom");
+    if (savedCustomRecipes) {
+      try {
+        const parsed = JSON.parse(savedCustomRecipes);
+        if (Array.isArray(parsed)) {
+          setRecipes((prev) => {
+            const existingIds = new Set(prev.map((r) => r.id));
+            const newToAdd = parsed.filter((r) => !existingIds.has(r.id));
+            return [...prev, ...newToAdd];
+          });
+        }
+      } catch (_) {}
+    }
+
+    // Carrega comentários locais complementares
+    const savedComments = localStorage.getItem("receitas_casa_comentarios");
+    if (savedComments) {
+      try {
+        const parsed = JSON.parse(savedComments);
+        setComments((prev) => {
+          const merged = { ...prev };
+          Object.keys(parsed).forEach((recipeId) => {
+            const existing = merged[recipeId] || [];
+            const existingIds = new Set(existing.map((c) => c.id));
+            const newComments = parsed[recipeId].filter((c: any) => !existingIds.has(c.id));
+            merged[recipeId] = [...existing, ...newComments];
+          });
+          return merged;
+        });
+      } catch (_) {}
+    }
   }, []);
 
   // --- ARQUIVOS DE MÍDIA - COMPRESSOR DE IMAGEM DA PESSOA QUE CRIOU A RECEITA ---
@@ -594,40 +663,56 @@ export default function App() {
       minute: "2-digit"
     });
 
-    if (currentUser && currentUser.uid) {
-      const commentId = `comment-${Date.now()}`;
-      try {
-        await setDoc(doc(db, "comments", commentId), {
-          id: commentId,
-          recipeId,
-          author: commenterName,
-          text: newCommentText.trim(),
-          timestamp: timestampStr,
-          userEmail: currentUser.email || null,
-          createdAt: serverTimestamp()
-        });
-        setNewCommentText("");
-      } catch (err) {
-        handleFirestoreError(err, OperationType.WRITE, `comments/${commentId}`);
+    const commentId = `comment-${Date.now()}`;
+
+    const newCommentObj: RecipeComment = {
+      id: commentId,
+      author: commenterName,
+      text: newCommentText.trim(),
+      timestamp: timestampStr,
+      userEmail: currentUser ? currentUser.email : "Visitante (Sem Conta)",
+      recipeId
+    };
+
+    // 1. Atualizar o estado local imediatamente de forma otimista
+    setComments((prev) => {
+      const updated = { ...prev };
+      const list = updated[recipeId] ? [...updated[recipeId]] : [];
+      if (!list.some(c => c.id === commentId)) {
+        list.unshift(newCommentObj); // Novo comentário no topo instantaneamente
       }
-    } else {
-      const newCommentObj: RecipeComment = {
-        id: `comment-${Date.now()}`,
+      updated[recipeId] = list;
+      return updated;
+    });
+
+    // 2. Salvar também no cache localStorage local de contingência imediata
+    try {
+      const saved = localStorage.getItem("receitas_casa_comentarios");
+      let parsed: { [recipeId: string]: RecipeComment[] } = saved ? JSON.parse(saved) : {};
+      if (!parsed[recipeId]) {
+        parsed[recipeId] = [];
+      }
+      if (!parsed[recipeId].some(c => c.id === commentId)) {
+        parsed[recipeId].unshift(newCommentObj);
+      }
+      localStorage.setItem("receitas_casa_comentarios", JSON.stringify(parsed));
+    } catch (_) {}
+
+    setNewCommentText("");
+
+    // 3. Enviar gravação em background assíncrono para o Firestore na nuvem
+    try {
+      await setDoc(doc(db, "comments", commentId), {
+        id: commentId,
+        recipeId,
         author: commenterName,
         text: newCommentText.trim(),
         timestamp: timestampStr,
-        userEmail: currentUser ? currentUser.email : undefined
-      };
-
-      const updatedComments = { ...comments };
-      if (!updatedComments[recipeId]) {
-        updatedComments[recipeId] = [];
-      }
-      updatedComments[recipeId] = [newCommentObj, ...updatedComments[recipeId]];
-
-      setComments(updatedComments);
-      localStorage.setItem("receitas_casa_comentarios", JSON.stringify(updatedComments));
-      setNewCommentText("");
+        userEmail: currentUser ? currentUser.email : "Visitante (Sem Conta)",
+        createdAt: serverTimestamp()
+      });
+    } catch (err) {
+      console.warn("Não foi possível enviar para o Firebase na nuvem, mantendo salvo apenas no dispositivo localmente:", err);
     }
   };
 
@@ -886,7 +971,7 @@ export default function App() {
         <div className="bg-[#FAF6EE] px-4 py-3 flex items-center justify-between border-b-4 border-[#3C3633] gap-2 z-10 relative">
           <div className="flex items-center gap-2.5">
             <img 
-              src="/src/assets/images/vovo_avatar_1781440678195.jpg" 
+              src={vovoAvatar} 
               alt="Vovó" 
               className="w-10 h-10 rounded-full border-2 border-[#3C3633] shadow-[2px_2px_0px_0px_rgba(60,54,51,1)] object-cover bg-[#FFDE4D]"
               referrerPolicy="no-referrer"
@@ -2004,6 +2089,15 @@ export default function App() {
                   </svg>
                   Entrar com Conta Google 🌐
                 </button>
+
+                <div className="bg-amber-50 border-2 border-amber-300 rounded-2xl p-3 text-left space-y-1">
+                  <span className="text-[10px] font-black uppercase text-amber-800 flex items-center gap-1">
+                    ⚠️ D ICA PARA CELULAR / APK
+                  </span>
+                  <p className="text-[10px] text-[#3C3633] font-bold leading-normal">
+                    Se você estiver usando o aplicativo no celular e o botão do Google der erro ou não abrir, por favor use a aba <strong>"CRIAR CONTA"</strong> logo acima para se cadastrar com seu e-mail e uma senha simples! É super fácil e funciona em qualquer telefone.
+                  </p>
+                </div>
 
                 <div className="flex items-center my-2 select-none">
                   <div className="flex-grow border-t-2 border-[#3C3633]/15"></div>

@@ -39,7 +39,7 @@ service cloud.firestore {
 
     match /comments/{commentId} {
       allow read: if true;
-      allow create: if isSignedIn();
+      allow create: if true;
       allow delete: if isSignedIn() && (resource.data.userEmail == request.auth.token.email || isAdmin());
     }
 
