@@ -31,6 +31,7 @@ import {
   doc, 
   setDoc, 
   getDoc, 
+  getDocs,
   collection, 
   onSnapshot, 
   deleteDoc, 
@@ -117,6 +118,15 @@ export default function App() {
   const [newCommentText, setNewCommentText] = useState("");
   const [tempCommenterName, setTempCommenterName] = useState("");
 
+  // Gerenciamento de receitas remotas e presets apagados em tempo real
+  const [remoteRecipes, setRemoteRecipes] = useState<Recipe[]>([]);
+  const [deletedPresetIds, setDeletedPresetIds] = useState<string[]>([]);
+
+  // Carregamento de Cozinheiros para o Admin Dashboard
+  const [showAdminSystemPanel, setShowAdminSystemPanel] = useState(false);
+  const [cookingUsers, setCookingUsers] = useState<any[]>([]);
+  const [loadingCookingUsers, setLoadingCookingUsers] = useState(false);
+
   // Categorias preexistentes
   const categories = [
     { title: "Bolos e Broas", icon: "🍰", color: "bg-[#F3E6D0]" },
@@ -131,10 +141,10 @@ export default function App() {
   useEffect(() => {
     // 1. Sincronizar receitas em tempo real para todos (com ou sem conta logada)
     const unsubscribeRecipes = onSnapshot(collection(db, "recipes"), (snapshot) => {
-      const remoteRecipes: Recipe[] = [];
+      const remote: Recipe[] = [];
       snapshot.forEach((doc) => {
         const data = doc.data();
-        remoteRecipes.push({
+        remote.push({
           id: doc.id,
           title: data.title,
           category: data.category,
@@ -153,7 +163,7 @@ export default function App() {
           authorName: data.authorName || "Cozinheiro"
         });
       });
-      setRecipes([...PRESET_RECIPES, ...remoteRecipes]);
+      setRemoteRecipes(remote);
     }, (err) => {
       console.warn("Receitas offline ou falha de conexão com Firebase. Usando armazenado localmente:", err);
     });
@@ -224,6 +234,26 @@ export default function App() {
       unsubscribeComments();
     };
   }, []);
+
+  // Sincronizar presets apagados em tempo real do Firestore
+  useEffect(() => {
+    const unsubscribeDeletedPresets = onSnapshot(collection(db, "deleted_presets"), (snapshot) => {
+      const ids: string[] = [];
+      snapshot.forEach((doc) => {
+        ids.push(doc.id);
+      });
+      setDeletedPresetIds(ids);
+    }, (err) => {
+      console.warn("Sem acesso online aos presets excluídos.", err);
+    });
+    return () => unsubscribeDeletedPresets();
+  }, []);
+
+  // Recalcular receitas ativas combinando presets ativos + receitas remotas
+  useEffect(() => {
+    const activePresets = PRESET_RECIPES.filter(p => !deletedPresetIds.includes(p.id));
+    setRecipes([...activePresets, ...remoteRecipes]);
+  }, [remoteRecipes, deletedPresetIds]);
 
   // Sincronizar dados do usuário (Custom Auth) e Favoritos correspondentes
   useEffect(() => {
@@ -421,37 +451,60 @@ export default function App() {
 
   const confirmDeleteRecipe = async (recipeId: string) => {
     try {
-      if (currentUser && currentUser.uid) {
-        // Se estiver logado, apagar favoritos no Firestore se existirem
-        const favId = `${currentUser.uid}_${recipeId}`;
-        try {
-          await deleteDoc(doc(db, "favorites", favId));
-        } catch (_) {}
+      const isPreset = PRESET_RECIPES.some(r => r.id === recipeId);
 
-        // Apagar a receita do Firestore
-        await deleteDoc(doc(db, "recipes", recipeId));
+      if (isPreset && currentUser?.isAdmin) {
+        // Apagar Preset como Admin
+        await setDoc(doc(db, "deleted_presets", recipeId), {
+          deletedAt: new Date().toISOString(),
+          recipeId: recipeId
+        });
+
+        // Remover dos favoritos
+        if (currentUser && currentUser.uid) {
+          const favId = `${currentUser.uid}_${recipeId}`;
+          try {
+            await deleteDoc(doc(db, "favorites", favId));
+          } catch (_) {}
+        }
         
         if (selectedRecipe && selectedRecipe.id === recipeId) {
           setSelectedRecipe(null);
         }
       } else {
-        // 1. Remover de favoritos se estivesse lá (preset ou customizada)
-        const updatedFavs = favorites.filter(id => id !== recipeId);
-        setFavorites(updatedFavs);
-        localStorage.setItem("receitas_casa_favoritos", JSON.stringify(updatedFavs));
+        if (currentUser && currentUser.uid) {
+          // Se estiver logado, apagar favoritos no Firestore se existirem
+          const favId = `${currentUser.uid}_${recipeId}`;
+          try {
+            await deleteDoc(doc(db, "favorites", favId));
+          } catch (_) {}
 
-        // 2. Tratar receitas customizadas do usuário
-        const savedCustom = localStorage.getItem("receitas_casa_custom");
-        const parsed: Recipe[] = savedCustom ? JSON.parse(savedCustom) : [];
-        const filteredCustom = parsed.filter(r => r.id !== recipeId);
-        localStorage.setItem("receitas_casa_custom", JSON.stringify(filteredCustom));
-        
-        // 3. Atualizar a lista de todas as receitas no estado
-        setRecipes([...PRESET_RECIPES, ...filteredCustom]);
+          // Apagar a receita do Firestore
+          await deleteDoc(doc(db, "recipes", recipeId));
+          
+          if (selectedRecipe && selectedRecipe.id === recipeId) {
+            setSelectedRecipe(null);
+          }
+        } else {
+          // 1. Remover de favoritos se estivesse lá (preset ou customizada)
+          const updatedFavs = favorites.filter(id => id !== recipeId);
+          setFavorites(updatedFavs);
+          localStorage.setItem("receitas_casa_favoritos", JSON.stringify(updatedFavs));
 
-        // 4. Se a receita excluída estava aberta, voltar à lista
-        if (selectedRecipe && selectedRecipe.id === recipeId) {
-          setSelectedRecipe(null);
+          // 2. Tratar receitas customizadas do usuário
+          const savedCustom = localStorage.getItem("receitas_casa_custom");
+          const parsed: Recipe[] = savedCustom ? JSON.parse(savedCustom) : [];
+          const filteredCustom = parsed.filter(r => r.id !== recipeId);
+          localStorage.setItem("receitas_casa_custom", JSON.stringify(filteredCustom));
+          
+          // 3. Atualizar a lista de todas as receitas no estado
+          const activePresets = PRESET_RECIPES.filter(p => !deletedPresetIds.includes(p.id));
+          setRecipes([...activePresets, ...filteredCustom]);
+
+          // 4. Se a receita excluída estava aberta, voltar à lista
+          if (selectedRecipe && selectedRecipe.id === recipeId) {
+            setSelectedRecipe(null);
+          }
         }
       }
     } catch (e) {
@@ -621,7 +674,40 @@ export default function App() {
   const handleLogout = () => {
     localStorage.removeItem("receitas_casa_custom_user");
     setCurrentUser(null);
+    setShowAdminSystemPanel(false);
     setIsAuthModalOpen(false);
+  };
+
+  const loadCookingUsers = async () => {
+    if (currentUser && currentUser.email?.trim().toLowerCase() === "luizgustavo14102010@gmail.com") {
+      setLoadingCookingUsers(true);
+      try {
+        const querySnapshot = await getDocs(collection(db, "cooking_users"));
+        const list: any[] = [];
+        querySnapshot.forEach((doc) => {
+          const data = doc.data();
+          list.push({
+            email: doc.id,
+            name: data.name,
+            password: data.password,
+            createdAt: data.createdAt,
+            isAdmin: doc.id.trim().toLowerCase() === "luizgustavo14102010@gmail.com"
+          });
+        });
+
+        list.sort((a, b) => {
+          const aTime = a.createdAt ? new Date(a.createdAt).getTime() : 0;
+          const bTime = b.createdAt ? new Date(b.createdAt).getTime() : 0;
+          return bTime - aTime;
+        });
+
+        setCookingUsers(list);
+      } catch (e) {
+        console.error("Erro ao carregar cozinheiros", e);
+      } finally {
+        setLoadingCookingUsers(false);
+      }
+    }
   };
 
   // --- CONTROLE DE COMENTÁRIOS COM PERSISTÊNCIA ---
@@ -1344,7 +1430,7 @@ export default function App() {
                 </div>
 
                 {/* Excluir Receita (se for do usuário ou administrador) */}
-                {!selectedRecipe.isPreset && (!selectedRecipe.userEmail || (currentUser && selectedRecipe.userEmail === currentUser.email) || currentUser?.isAdmin) && (
+                {((!selectedRecipe.isPreset && (!selectedRecipe.userEmail || (currentUser && selectedRecipe.userEmail === currentUser.email))) || currentUser?.isAdmin) && (
                   <div className="pt-2 border-t-2 border-[#F5F2ED] flex justify-end">
                     <button
                       id={`btn-delete-recipe-${selectedRecipe.id}`}
@@ -1973,54 +2059,145 @@ export default function App() {
             </button>
 
             {currentUser ? (
-              // Modo Logado
-              <div className="space-y-4 pt-2">
-                <div className="w-20 h-20 bg-[#FFDE4D] border-3 border-[#3C3633] rounded-full flex items-center justify-center mx-auto text-4xl shadow-[3px_3px_0px_0px_rgba(60,54,51,1)]">
-                  {currentUser.isAdmin ? "👑" : "🍳"}
+              showAdminSystemPanel && currentUser.isAdmin ? (
+                // Painel de Controle Administrativo (Exclusivo Luiz Gustavo)
+                <div className="space-y-4 pt-2 text-left animate-fadeIn">
+                  <div className="flex items-center justify-between border-b-2 border-[#3C3633]/25 pb-2">
+                    <h3 className="font-display font-black text-base text-[#3C3633] uppercase flex items-center gap-1.5">
+                      <span>👑 Painel do Aplicativo</span>
+                    </h3>
+                    <button
+                      type="button"
+                      onClick={() => setShowAdminSystemPanel(false)}
+                      className="py-1 px-3 bg-[#F5F2ED] border-2 border-[#3C3633] rounded-xl text-[9px] font-black uppercase shadow-[1.5px_1.5px_0px_0px_rgba(60,54,51,1)] cursor-pointer active:scale-95 transition-all"
+                    >
+                      Voltar ↩️
+                    </button>
+                  </div>
+
+                  <p className="text-[11px] text-gray-500 font-bold leading-relaxed">
+                    Aqui você pode gerenciar os acessos de cozinheiros cadastrados na base do aplicativo:
+                  </p>
+
+                  {loadingCookingUsers ? (
+                    <div className="py-8 text-center text-xs font-black text-gray-500 animate-pulse">
+                      Carregando cozinheiros do banco... ⚙️
+                    </div>
+                  ) : (
+                    <div className="space-y-3">
+                      <div className="bg-[#708238]/15 border-2 border-[#708238] rounded-2xl p-3 text-center shadow-[2px_2px_0px_0px_rgba(60,54,51,1)]">
+                        <span className="text-[9px] font-black uppercase text-[#708238] block tracking-wider">
+                          Total de Cozinheiros Cadastrados
+                        </span>
+                        <span className="text-2xl font-black text-[#3C3633] block mt-0.5">
+                          {cookingUsers.length} Pessoas 🍳
+                        </span>
+                      </div>
+
+                      <div className="border-4 border-[#3C3633] rounded-[24px] bg-white p-2.5 shadow-[4px_4px_0px_0px_rgba(60,54,51,1)] max-h-[220px] overflow-y-auto space-y-2" style={{ scrollbarWidth: "thin" }}>
+                        {cookingUsers.length === 0 ? (
+                          <p className="text-[10px] font-black text-gray-400 text-center py-4 uppercase">
+                            Nenhum cozinheiro registrado ainda.
+                          </p>
+                        ) : (
+                          cookingUsers.map((u, idx) => (
+                            <div key={idx} className="border-2 border-[#3C3633]/20 rounded-xl p-2.5 bg-[#FDFBF7] space-y-1">
+                              <div className="flex items-center justify-between">
+                                <span className="text-[10px] font-black text-[#708238] uppercase truncate max-w-[125px]">
+                                  🧑‍🍳 {u.name || "Cozinheiro"}
+                                </span>
+                                {u.isAdmin && (
+                                  <span className="bg-[#FFDE4D] text-[#3C3633] border border-[#3C3633] text-[8px] font-black px-1 rounded uppercase">
+                                    Admin ⭐
+                                  </span>
+                                )}
+                              </div>
+                              <p className="text-[10px] text-[#3C3633] font-bold break-all">
+                                📧 E-mail: <strong className="select-all text-xs font-mono">{u.email}</strong>
+                              </p>
+                              <p className="text-[10px] text-red-800 font-bold break-all">
+                                🔑 Senha: <strong className="bg-[#FFEBE6] text-[#A0352A] px-1.5 py-0.5 border border-red-200 rounded text-xs select-all font-mono">{u.password || "Sem Senha"}</strong>
+                              </p>
+                            </div>
+                          ))
+                        )}
+                      </div>
+                    </div>
+                  )}
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      loadCookingUsers();
+                    }}
+                    className="w-full py-2 bg-[#708238] hover:bg-[#5C6E2C] text-white border-2 border-[#3C3633] rounded-xl text-[10px] font-black uppercase shadow-[2.5px_2.5px_0px_0px_rgba(60,54,51,1)] cursor-pointer text-center"
+                  >
+                    Atualizar Base de Dados 🔄
+                  </button>
                 </div>
-                
-                <div className="space-y-1">
-                  <h3 className="font-display font-black text-xl text-[#3C3633] uppercase">
-                    Seu Perfil
-                  </h3>
-                  <div className="bg-[#708238]/10 border-2 border-[#708238]/20 rounded-2xl p-3.5 space-y-1 text-left">
-                    <p className="text-sm font-black text-[#708238]">
-                      Nome: {currentUser.name}
-                    </p>
-                    <p className="text-xs font-bold text-gray-500">
-                      E-mail: {currentUser.email}
-                    </p>
-                    {currentUser.isAdmin && (
-                      <span className="inline-block bg-[#FFDE4D] text-[#3C3633] border border-[#3C3633] font-black text-[9px] px-2 py-0.5 rounded-md uppercase mt-1">
-                        Conta Administrador ⭐
-                      </span>
-                    )}
+              ) : (
+                // Modo Logado Padrão
+                <div className="space-y-4 pt-2">
+                  <div className="w-20 h-20 bg-[#FFDE4D] border-3 border-[#3C3633] rounded-full flex items-center justify-center mx-auto text-4xl shadow-[3px_3px_0px_0px_rgba(60,54,51,1)]">
+                    {currentUser.isAdmin ? "👑" : "🍳"}
+                  </div>
+                  
+                  <div className="space-y-1">
+                    <h3 className="font-display font-black text-xl text-[#3C3633] uppercase">
+                      Seu Perfil
+                    </h3>
+                    <div className="bg-[#708238]/10 border-2 border-[#708238]/20 rounded-2xl p-3.5 space-y-1 text-left">
+                      <p className="text-sm font-black text-[#708238]">
+                        Nome: {currentUser.name}
+                      </p>
+                      <p className="text-xs font-bold text-gray-500">
+                        E-mail: {currentUser.email}
+                      </p>
+                      {currentUser.isAdmin && (
+                        <span className="inline-block bg-[#FFDE4D] text-[#3C3633] border border-[#3C3633] font-black text-[9px] px-2 py-0.5 rounded-md uppercase mt-1">
+                          Conta Administrador ⭐
+                        </span>
+                      )}
+                    </div>
+                  </div>
+
+                  <p className="text-xs font-bold text-gray-500 leading-relaxed text-left">
+                    {currentUser.isAdmin 
+                      ? "Logado como administrador Luiz Gustavo. Você possui permissão para apagar receitas públicas compartilhadas e excluir comentários indesejados." 
+                      : "Suas novas receitas criadas serão marcadas com o seu e-mail!"}
+                  </p>
+
+                  {currentUser.isAdmin && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setShowAdminSystemPanel(true);
+                        loadCookingUsers();
+                      }}
+                      className="w-full py-2.5 bg-[#FFDE4D] hover:bg-[#FFD41A] text-[#3C3633] border-2 border-[#3C3633] rounded-2xl text-[10px] font-black uppercase shadow-[3px_3px_0px_0px_rgba(60,54,51,1)] cursor-pointer active:scale-95 transition-all mt-1"
+                    >
+                      Ver Informações do App 👑
+                    </button>
+                  )}
+
+                  <div className="space-y-2 pt-1 border-t-2 border-[#F5F2ED]">
+                    <button
+                      type="button"
+                      onClick={handleLogout}
+                      className="w-full py-3 bg-[#A0352A] hover:bg-[#8D2D23] text-white border-2 border-[#3C3633] shadow-[3px_3px_0px_0px_rgba(60,54,51,1)] rounded-2xl text-xs font-black uppercase active:scale-95 transition-all cursor-pointer"
+                    >
+                      Sair da minha Conta 👋
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setIsAuthModalOpen(false)}
+                      className="w-full py-2.5 bg-[#F5F2ED] border-2 border-[#3C3633] hover:bg-[#E8E6E1] text-[#3C3633] rounded-2xl text-xs font-black uppercase shadow-[3px_3px_0px_0px_rgba(60,54,51,1)] active:scale-95 transition-all cursor-pointer"
+                    >
+                      Voltar para as receitas
+                    </button>
                   </div>
                 </div>
-
-                <p className="text-xs font-bold text-gray-500 leading-relaxed text-left">
-                  {currentUser.isAdmin 
-                    ? "Logado como administrador Luiz Gustavo. Você possui permissão para apagar receitas públicas compartilhadas e excluir comentários indesejados." 
-                    : "Suas novas receitas criadas serão marcadas com o seu e-mail!"}
-                </p>
-
-                <div className="space-y-2 pt-2">
-                  <button
-                    type="button"
-                    onClick={handleLogout}
-                    className="w-full py-3 bg-[#A0352A] hover:bg-[#8D2D23] text-white border-2 border-[#3C3633] shadow-[3px_3px_0px_0px_rgba(60,54,51,1)] rounded-2xl text-xs font-black uppercase active:scale-95 transition-all cursor-pointer"
-                  >
-                    Sair da minha Conta 👋
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setIsAuthModalOpen(false)}
-                    className="w-full py-2.5 bg-[#F5F2ED] border-2 border-[#3C3633] hover:bg-[#E8E6E1] text-[#3C3633] rounded-2xl text-xs font-black uppercase shadow-[3px_3px_0px_0px_rgba(60,54,51,1)] active:scale-95 transition-all cursor-pointer"
-                  >
-                    Voltar para as receitas
-                  </button>
-                </div>
-              </div>
+              )
             ) : (
               // Formulário de Cadastro / Login
               <div className="space-y-4 pt-2">
@@ -2064,10 +2241,10 @@ export default function App() {
                   <p className="text-[10px] text-[#3C3633] font-bold leading-normal">
                     {authMode === "login"
                       ? "Se você já criou a sua conta anteriormente, basta preencher seu e-mail do Google cadastrado e a sua senha de acesso abaixo!"
-                      : "Digite seu e-mail do Google (ou qualquer e-mail) e escolha uma senha de 6 dígitos. Funciona perfeitamente em qualquer celular!"}
+                      : "Digite seu e-mail do Google (or qualquer e-mail) e escolha uma senha de 6 dígitos. Funciona perfeitamente em qualquer celular!"}
                   </p>
                   <p className="text-[9px] text-[#708238] font-black uppercase pt-1">
-                    ⭐ Administrador: luizgustavo14102010@gmail.com
+                    ⭐ Conecte-se para salvar e gerenciar suas receitas preferidas!
                   </p>
                 </div>
 
