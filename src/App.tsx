@@ -121,6 +121,7 @@ export default function App() {
   const [newInstructionsText, setNewInstructionsText] = useState("");
   const [newDescription, setNewDescription] = useState("");
   const [isGeneratingDescription, setIsGeneratingDescription] = useState(false);
+  const [isSaving, setIsSaving] = useState(false);
   const [newImageUrl, setNewImageUrl] = useState("");
   const [newIsPublic, setNewIsPublic] = useState(true);
   const [newAuthorName, setNewAuthorName] = useState("");
@@ -1023,6 +1024,7 @@ export default function App() {
   // --- SALVAR NOVA RECEITA ---
   const handleSaveRecipe = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (isSaving) return;
     try {
       // Verificações robustas com feedback amigável para idosos
       const missingFields: string[] = [];
@@ -1064,6 +1066,9 @@ export default function App() {
         return;
       }
 
+      setIsSaving(true);
+      setFormFeedback(null);
+
       // Processamento de listas
       const ingredientsArray = newIngredientsText
         .split("\n")
@@ -1075,6 +1080,34 @@ export default function App() {
         .map(line => line.trim())
         .filter(line => line.length > 0);
 
+      const newCategoryToSave = newCategory || "Bolos e Broas";
+
+      // GERAR LEGENDA AUTOMÁTICA COM INTELIGÊNCIA ARTIFICIAL SE TIVER EM BRANCO
+      let finalDescription = newDescription.trim();
+      if (!finalDescription) {
+        try {
+          const genRes = await fetch("/api/generate-description", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              title: newTitle.trim(),
+              ingredients: ingredientsArray,
+              category: newCategoryToSave
+            })
+          });
+          const genData = await genRes.json();
+          if (genData.description) {
+            finalDescription = genData.description;
+          }
+        } catch (genErr) {
+          console.error("Erro na geração automática silenciosa de legenda:", genErr);
+        }
+      }
+
+      if (!finalDescription) {
+        finalDescription = "Receita caseira escrita com muito afeto no aplicativo.";
+      }
+
       const createdId = `custom-${Date.now()}`;
       const fallbackImages: { [key: string]: string } = {
         "Bolos e Broas": "https://images.unsplash.com/photo-1606313564200-e75d5e30476c?auto=format&fit=crop&q=80&w=600",
@@ -1084,14 +1117,12 @@ export default function App() {
         "Sobremesas e Doces": "https://images.unsplash.com/photo-1533782654613-826a072dd6f3?auto=format&fit=crop&q=80&w=600"
       };
 
-      const newCategoryToSave = newCategory || "Bolos e Broas";
-
       if (currentUser && currentUser.uid) {
         // Salvar no Firestore de forma persistente e segura
         const newRecipeObj: any = {
           title: newTitle.trim(),
           category: newCategoryToSave,
-          description: newDescription.trim() || "Receita caseira escrita com muito afeto no aplicativo.",
+          description: finalDescription,
           prepTime: newPrepTime.trim(),
           portions: `${newPortions.trim()} porções`,
           ingredients: ingredientsArray,
@@ -1120,7 +1151,7 @@ export default function App() {
           id: createdId,
           title: newTitle.trim(),
           category: newCategoryToSave,
-          description: newDescription.trim() || "Receita caseira escrita com muito afeto no aplicativo.",
+          description: finalDescription,
           prepTime: newPrepTime.trim(),
           portions: `${newPortions.trim()} porções`,
           ingredients: ingredientsArray,
@@ -1189,6 +1220,8 @@ export default function App() {
     } catch (errorSave: any) {
       console.error("Erro geral ao salvar receita", errorSave);
       setFormFeedback(`Desculpe! Ocorreu um problema ao guardar a receita: ${errorSave.message || errorSave}`);
+    } finally {
+      setIsSaving(false);
     }
   };
 
@@ -2039,68 +2072,25 @@ export default function App() {
                       />
                     </div>
 
-                    {/* Campo: Descrição / Legenda Especial (com suporte a IA) */}
+                    {/* Campo: Descrição / Legenda Especial (Geração Automática) */}
                     <div className="space-y-2 bg-[#FBF9F6] border-4 border-[#3C3633] rounded-[24px] p-4.5 shadow-[2px_2px_0px_0px_rgba(60,54,51,0.05)] text-left">
                       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
-                        <label className="text-sm font-black text-[#3C3633] font-display tracking-wide uppercase animate-pulse" htmlFor="input-descritivo">
+                        <label className="text-sm font-black text-[#3C3633] font-display tracking-wide uppercase" htmlFor="input-descritivo">
                           4. História ou Legenda do Prato
                         </label>
-                        <button
-                          type="button"
-                          disabled={isGeneratingDescription || !newTitle.trim()}
-                          onClick={async () => {
-                            if (!newTitle.trim()) return;
-                            setIsGeneratingDescription(true);
-                            try {
-                              const response = await fetch("/api/generate-description", {
-                                method: "POST",
-                                headers: { "Content-Type": "application/json" },
-                                body: JSON.stringify({
-                                  title: newTitle,
-                                  ingredients: newIngredientsText.split("\n").filter(i => i.trim()),
-                                  category: newCategory
-                                })
-                              });
-                              const data = await response.json();
-                              if (data.description) {
-                                setNewDescription(data.description);
-                              } else if (data.error) {
-                                alert(data.error);
-                              }
-                            } catch (e) {
-                              console.error("Erro ao falar com a IA:", e);
-                              alert("Não conseguimos falar com a Vovó IA agora. Escreva do seu jeitinho!");
-                            } finally {
-                              setIsGeneratingDescription(false);
-                            }
-                          }}
-                          className={`py-2 px-3.5 rounded-xl border-2 border-[#3C3633] text-xs font-black uppercase flex items-center justify-center gap-1.5 transition-all cursor-pointer ${
-                            !newTitle.trim()
-                              ? "bg-gray-100 text-gray-400 border-gray-300 opacity-60 cursor-not-allowed"
-                              : "bg-[#708238]/10 hover:bg-[#708238]/20 text-[#708238] border-[#708238] shadow-[2px_2px_0px_0px_rgba(112,130,56,1)] active:scale-95"
-                          }`}
-                        >
-                          {isGeneratingDescription ? (
-                            <>
-                              <span className="w-3.5 h-3.5 border-2 border-[#708238] border-t-transparent rounded-full animate-spin"></span>
-                              Escrevendo com carinho...
-                            </>
-                          ) : (
-                            <>
-                              👵✨ Criar legenda com Vovó IA
-                            </>
-                          )}
-                        </button>
+                        <span className="text-[10px] font-extrabold uppercase bg-[#708238]/10 text-[#708238] border border-[#708238]/30 px-2.5 py-1 rounded-full">
+                          ✨ Vovó IA Automática se em branco
+                        </span>
                       </div>
                       <p className="text-[11px] text-[#3C3633]/85 font-semibold leading-relaxed">
-                        Escreva um pequeno texto fofinho contando a história da receita ou clique em <strong>👵✨ Criar legenda com Vovó IA</strong> para que nossa inteligência escreva uma linda legenda fofinha com base no título e ingredientes!
+                        Escreva uma história carinhosa ou <strong>deixe em branco</strong> para o aplicativo usar nossa Inteligência de Vovó e criar uma linda legenda fofinha com base no título e ingredientes automaticamente ao salvar!
                       </p>
                       <textarea
                         id="input-descritivo"
                         rows={3}
                         value={newDescription}
                         onChange={(e) => setNewDescription(e.target.value)}
-                        placeholder="Ex: Essa receita me lembra as tardes ensolaradas no sítio da minha avó Joana quando éramos crianças..."
+                        placeholder="Ex: Deixe em branco para gerar automaticamente ou conte a sua própria história..."
                         className="w-full p-4 bg-white border-4 border-[#3C3633] rounded-2xl text-base font-bold leading-relaxed focus:border-[#708238]"
                       />
                     </div>
@@ -2225,9 +2215,21 @@ export default function App() {
                     <button 
                       id="btn-submeter"
                       type="submit"
-                      className="w-full py-4 bg-[#708238] hover:bg-[#5C6E2C] active:bg-[#3C3633] text-white text-lg font-black rounded-2xl shadow-[4px_4px_0px_0px_rgba(60,54,51,1)] border-4 border-[#3C3633] transition-all active:translate-x-0.5 active:translate-y-0.5 active:shadow-none cursor-pointer flex items-center justify-center gap-2 uppercase tracking-wide font-display"
+                      disabled={isSaving}
+                      className={`w-full py-4 text-white text-lg font-black rounded-2xl border-4 border-[#3C3633] transition-all flex items-center justify-center gap-2 uppercase tracking-wide font-display ${
+                        isSaving 
+                          ? "bg-gray-400 cursor-not-allowed shadow-none" 
+                          : "bg-[#708238] hover:bg-[#5C6E2C] active:bg-[#3C3633] shadow-[4px_4px_0px_0px_rgba(60,54,51,1)] active:translate-x-0.5 active:translate-y-0.5 active:shadow-none cursor-pointer"
+                      }`}
                     >
-                      <span>💾 GUARDAR RECEITA COM AMOR</span>
+                      {isSaving ? (
+                        <>
+                          <span className="w-5 h-5 border-3 border-white border-t-transparent rounded-full animate-spin"></span>
+                          <span>Escrevendo linda história e salvando...</span>
+                        </>
+                      ) : (
+                        <span>💾 GUARDAR RECEITA COM AMOR</span>
+                      )}
                     </button>
                   </form>
                 </div>
