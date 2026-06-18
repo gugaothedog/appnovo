@@ -1051,7 +1051,7 @@ export default function App() {
         return;
       }
 
-      // Se for publicar de forma pública, exige foto e o nome do criador
+      // Se for publicar de forma pública, exige foto
       if (newIsPublic && !newImageUrl.trim()) {
         setFormFeedback(
           "Para publicar a receita de forma pública para todos verem, você precisa adicionar uma linda foto do seu prato! 📸 Se não tiver foto agora, clique em '🔒 SÓ NO CADERNO' para guardar de forma particular no seu caderno de receitas."
@@ -1059,15 +1059,10 @@ export default function App() {
         return;
       }
 
-      if (!newAuthorName.trim()) {
-        setFormFeedback(
-          "Atenção: Você precisa preencher o campo 'Seu nome ou apelido (Criador da receita)'! 👵 Assim todos saberão quem criou ou adaptou essa delícia."
-        );
-        return;
-      }
-
       setIsSaving(true);
       setFormFeedback(null);
+
+      const finalAuthorName = currentUser?.name?.trim() || "Cozinheiro Visitante";
 
       // Processamento de listas
       const ingredientsArray = newIngredientsText
@@ -1082,30 +1077,28 @@ export default function App() {
 
       const newCategoryToSave = newCategory || "Bolos e Broas";
 
-      // GERAR LEGENDA AUTOMÁTICA COM INTELIGÊNCIA ARTIFICIAL SE TIVER EM BRANCO
-      let finalDescription = newDescription.trim();
-      if (!finalDescription) {
-        try {
-          const genRes = await fetch("/api/generate-description", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              title: newTitle.trim(),
-              ingredients: ingredientsArray,
-              category: newCategoryToSave
-            })
-          });
-          const genData = await genRes.json();
-          if (genData.description) {
-            finalDescription = genData.description;
-          }
-        } catch (genErr) {
-          console.error("Erro na geração automática silenciosa de legenda:", genErr);
+      // GERAR LEGENDA AUTOMÁTICA SILENCIOSA COM INTELIGÊNCIA ARTIFICIAL
+      let finalDescription = "";
+      try {
+        const genRes = await fetch("/api/generate-description", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            title: newTitle.trim(),
+            ingredients: ingredientsArray,
+            category: newCategoryToSave
+          })
+        });
+        const genData = await genRes.json();
+        if (genData.description) {
+          finalDescription = genData.description;
         }
+      } catch (genErr) {
+        console.error("Erro na geração automática silenciosa de legenda:", genErr);
       }
 
       if (!finalDescription) {
-        finalDescription = "Receita caseira escrita com muito afeto no aplicativo.";
+        finalDescription = "Receita caseira escrita com muito afeto no aplicativo de receitas.";
       }
 
       const createdId = `custom-${Date.now()}`;
@@ -1131,7 +1124,7 @@ export default function App() {
           rating: newRatingSetting || 5.0,
           ratingsCount: 1,
           authorId: currentUser.uid,
-          authorName: newAuthorName.trim() || currentUser.name || "Cozinheiro",
+          authorName: finalAuthorName,
           isPublic: newIsPublic,
           userEmail: currentUser.email,
           createdAt: serverTimestamp(),
@@ -1163,7 +1156,7 @@ export default function App() {
           isPublic: newIsPublic,
           userEmail: undefined,
           authorId: undefined,
-          authorName: newAuthorName.trim() || "Cozinheiro"
+          authorName: finalAuthorName
         };
 
         const savedCustom = localStorage.getItem("receitas_casa_custom");
@@ -2072,33 +2065,10 @@ export default function App() {
                       />
                     </div>
 
-                    {/* Campo: Descrição / Legenda Especial (Geração Automática) */}
-                    <div className="space-y-2 bg-[#FBF9F6] border-4 border-[#3C3633] rounded-[24px] p-4.5 shadow-[2px_2px_0px_0px_rgba(60,54,51,0.05)] text-left">
-                      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
-                        <label className="text-sm font-black text-[#3C3633] font-display tracking-wide uppercase" htmlFor="input-descritivo">
-                          4. História ou Legenda do Prato
-                        </label>
-                        <span className="text-[10px] font-extrabold uppercase bg-[#708238]/10 text-[#708238] border border-[#708238]/30 px-2.5 py-1 rounded-full">
-                          ✨ Vovó IA Automática se em branco
-                        </span>
-                      </div>
-                      <p className="text-[11px] text-[#3C3633]/85 font-semibold leading-relaxed">
-                        Escreva uma história carinhosa ou <strong>deixe em branco</strong> para o aplicativo usar nossa Inteligência de Vovó e criar uma linda legenda fofinha com base no título e ingredientes automaticamente ao salvar!
-                      </p>
-                      <textarea
-                        id="input-descritivo"
-                        rows={3}
-                        value={newDescription}
-                        onChange={(e) => setNewDescription(e.target.value)}
-                        placeholder="Ex: Deixe em branco para gerar automaticamente ou conte a sua própria história..."
-                        className="w-full p-4 bg-white border-4 border-[#3C3633] rounded-2xl text-base font-bold leading-relaxed focus:border-[#708238]"
-                      />
-                    </div>
-
                     {/* Campo: Enviar Foto Real */}
                     <div className="space-y-1.5 text-left">
                       <label className="text-sm font-black text-[#3C3633] block font-display tracking-wide uppercase">
-                        5. Adicione uma foto real do seu prato
+                        4. Adicione uma foto real do seu prato
                       </label>
                       <p className="text-[11px] text-[#3C3633]/85 font-bold -mt-0.5 mb-2 bg-[#F5F2ED] p-2 rounded-xl border border-[#3C3633]/20">
                         📸 Clique abaixo para tirar uma foto na hora com o celular ou escolher de sua galeria! Nós reduzimos o tamanho dela automaticamente para caber.
@@ -2147,7 +2117,7 @@ export default function App() {
                     {/* Campo: Publicar ou Privar */}
                     <div className="space-y-2 text-left bg-[#FAF6EE] border-4 border-[#3C3633] rounded-[24px] p-4.5 shadow-[2px_2px_0px_0px_rgba(60,54,51,0.1)]">
                       <label className="text-sm font-black text-[#3C3633] block font-display tracking-wide uppercase">
-                        6. Onde salvar essa receita?
+                        5. Onde salvar essa receita?
                       </label>
                       <p className="text-[11px] text-[#3C3633]/85 font-semibold -mt-0.5 mb-2 leading-relaxed">
                         🌎 <strong>Publicar para todos:</strong> Outras pessoas que usam o aplicativo poderão ver e fazer sua receita.
@@ -2180,28 +2150,15 @@ export default function App() {
                           🌎 PUBLICAR PARA TODOS
                         </button>
                       </div>
-                    </div>
 
-                    {/* Campo: Nome do Criador / Autor */}
-                    <div className="space-y-1.5 text-left bg-white border-4 border-[#3C3633] rounded-[24px] p-4.5 shadow-[2px_2px_0px_0px_rgba(60,54,51,0.1)]">
-                      <label className="text-sm font-black text-[#3C3633] block font-display tracking-wide uppercase" htmlFor="input-autor">
-                        7. Quem escreveu esta delícia? (Nome do Criador)
-                      </label>
-                      <input 
-                        id="input-autor"
-                        type="text"
-                        value={newAuthorName}
-                        onChange={(e) => setNewAuthorName(e.target.value)}
-                        placeholder="Ex: Vovó Maria, Luiz Gustavo..."
-                        maxLength={50}
-                        className="w-full p-4 bg-white border-4 border-[#3C3633] rounded-2xl text-base font-extrabold focus:border-[#708238] transition-all"
-                        required
-                      />
-                      <p className="text-[11px] text-[#3C3633]/80 font-bold leading-relaxed">
-                        {newIsPublic 
-                          ? "⭐ Identificação Pública: Como você escolheu Publicar para Todos, seu nome aparecerá em destaque para sabermos quem criou esta obra de arte!" 
-                          : "Seu nome será guardado no seu caderno particular junto com a receita."}
-                      </p>
+                      <div className="mt-3.5 pt-3 border-t-2 border-[#3C3633]/15 text-left">
+                        <p className="text-[11px] text-[#3C3633]/90 font-bold flex items-center gap-1.5">
+                          👤 Receita criada por: <strong className="text-[#708238] uppercase tracking-wider">{currentUser ? currentUser.name : "Cozinheiro Visitante"}</strong>
+                        </p>
+                        <p className="text-[9.5px] text-[#3C3633]/70 font-semibold leading-tight mt-0.5">
+                          (Identificação associada de forma segura diretamente à sua conta ativa)
+                        </p>
+                      </div>
                     </div>
 
                     {/* Botão de Enviar gigante */}
