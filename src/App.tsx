@@ -2182,7 +2182,7 @@ export default function App() {
                       {isSaving ? (
                         <>
                           <span className="w-5 h-5 border-3 border-white border-t-transparent rounded-full animate-spin"></span>
-                          <span>Escrevendo linda história e salvando...</span>
+                          <span>Guardando sua receita...</span>
                         </>
                       ) : (
                         <span>💾 GUARDAR RECEITA COM AMOR</span>
