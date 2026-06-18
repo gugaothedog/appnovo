@@ -1,4 +1,4 @@
-const CACHE_NAME = 'receitas-vovo-cache-v1';
+const CACHE_NAME = 'receitas-vovo-cache-v2';
 const ASSETS_TO_CACHE = [
   '/',
   '/index.html',
@@ -30,8 +30,8 @@ self.addEventListener('activate', (event) => {
 });
 
 self.addEventListener('fetch', (event) => {
-  // Let's exclude API, auth, or firestore-specific calls from being intercepted by the standard service worker
   const url = event.request.url;
+  // Let's exclude API, auth, or firestore-specific calls from being intercepted
   if (url.includes('firestore.googleapis.com') || url.includes('identitytoolkit.googleapis.com') || url.includes('/api/')) {
     return;
   }
@@ -45,25 +45,24 @@ self.addEventListener('fetch', (event) => {
     return;
   }
 
+  // Network-First strategy for assets: try network first, fallback to cache
   event.respondWith(
-    caches.match(event.request).then((cachedResponse) => {
-      if (cachedResponse) {
-        return cachedResponse;
-      }
-      return fetch(event.request).then((networkResponse) => {
-        if (!networkResponse || networkResponse.status !== 200 || networkResponse.type !== 'basic') {
-          return networkResponse;
-        }
-        
-        // Cache static files (images, css, js) locally
-        const responseToCache = networkResponse.clone();
-        caches.open(CACHE_NAME).then((cache) => {
-          cache.put(event.request, responseToCache);
-        });
-        
+    fetch(event.request).then((networkResponse) => {
+      if (!networkResponse || networkResponse.status !== 200 || networkResponse.type !== 'basic') {
         return networkResponse;
-      }).catch(() => {
-        // Fallback or generic response when offline
+      }
+      
+      const responseToCache = networkResponse.clone();
+      caches.open(CACHE_NAME).then((cache) => {
+        cache.put(event.request, responseToCache);
+      });
+      
+      return networkResponse;
+    }).catch(() => {
+      return caches.match(event.request).then((cachedResponse) => {
+        if (cachedResponse) {
+          return cachedResponse;
+        }
         return caches.match('/index.html') || new Response('Offline', { status: 503, statusText: 'Offline' });
       });
     })

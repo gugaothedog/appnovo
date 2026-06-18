@@ -56,6 +56,28 @@ export interface RecipeComment {
   recipeId?: string;
 }
 
+// Filtro de palavras impróprias/palavrões em português para proteção do ambiente
+export const filterBadWords = (text: string): string => {
+  if (!text) return text;
+  const badWords = [
+    /fdp/gi, /caralho/gi, /porra/gi, /bosta/gi, /cacete/gi, /viado/gi, 
+    /puta/gi, /foder/gi, /foda/gi, /desgraça/gi, /corno/gi, /cu/gi, 
+    /pau/gi, /filho da puta/gi, /buceta/gi, /arrombado/gi, /merda/gi,
+    /idiota/gi, /imbecil/gi, /otario/gi, /babaca/gi, /corna/gi, /puto/gi,
+    /retardado/gi, /bicha/gi, /piranha/gi, /vagina/gi, /v@gina/gi, /p\*rra/gi,
+    /c\*ralho/gi, /p\*ta/gi, /m\*rda/gi, /penis/gi, /pênis/gi, /chupa/gi
+  ];
+  
+  let filteredText = text;
+  badWords.forEach(pattern => {
+    filteredText = filteredText.replace(pattern, (match) => {
+      // Substitui por caracteres especiais mantendo a primeira letra visível e o resto ocultado
+      return match[0] + "*".repeat(match.length - 1);
+    });
+  });
+  return filteredText;
+};
+
 // Cores Principais do Projeto Tema Bento Grid:
 // Creme Suave (Background): bg-[#FDFBF7]
 // Cinza/Marrom Escuro (Texto Principal): text-[#3C3633]
@@ -99,6 +121,7 @@ export default function App() {
   const [newInstructionsText, setNewInstructionsText] = useState("");
   const [newImageUrl, setNewImageUrl] = useState("");
   const [newIsPublic, setNewIsPublic] = useState(true);
+  const [newAuthorName, setNewAuthorName] = useState("");
   const [newRatingSetting, setNewRatingSetting] = useState(5);
   const [formFeedback, setFormFeedback] = useState<string | null>(null);
 
@@ -121,6 +144,30 @@ export default function App() {
   // Gerenciamento de receitas remotas e presets apagados em tempo real
   const [remoteRecipes, setRemoteRecipes] = useState<Recipe[]>([]);
   const [deletedPresetIds, setDeletedPresetIds] = useState<string[]>([]);
+  const [locallyDeletedIds, setLocallyDeletedIds] = useState<string[]>(() => {
+    try {
+      return JSON.parse(localStorage.getItem("receitas_casa_locally_deleted") || "[]");
+    } catch (_) {
+      return [];
+    }
+  });
+  const [locallyCreatedCommentIds, setLocallyCreatedCommentIds] = useState<string[]>(() => {
+    try {
+      return JSON.parse(localStorage.getItem("receitas_casa_my_written_comments") || "[]");
+    } catch (_) {
+      return [];
+    }
+  });
+
+  // Estados para avaliações e estrelas interativas
+  const [hoveredStar, setHoveredStar] = useState<number | null>(null);
+  const [userRatings, setUserRatings] = useState<{ [recipeId: string]: number }>(() => {
+    try {
+      return JSON.parse(localStorage.getItem("receitas_casa_user_ratings") || "{}");
+    } catch (_) {
+      return {};
+    }
+  });
 
   // Carregamento de Cozinheiros para o Admin Dashboard
   const [showAdminSystemPanel, setShowAdminSystemPanel] = useState(false);
@@ -172,21 +219,7 @@ export default function App() {
     const unsubscribeComments = onSnapshot(collection(db, "comments"), (snapshot) => {
       const groupedComments: { [recipeId: string]: RecipeComment[] } = {};
 
-      // Carregar os comentários locais primeiro como base
-      let localComments: { [recipeId: string]: RecipeComment[] } = {};
-      const savedComments = localStorage.getItem("receitas_casa_comentarios");
-      if (savedComments) {
-        try {
-          localComments = JSON.parse(savedComments);
-        } catch (_) {}
-      }
-
-      // Preencher inicialmente com os comentários locais
-      Object.keys(localComments).forEach((rId) => {
-        groupedComments[rId] = [...localComments[rId]];
-      });
-
-      // Mesclar e sobrescrever com os comentários oficiais do Firestore
+      // Sincronizar apenas o conteúdo que de fato está no Firestore ou foi persistido mais recentemente
       snapshot.forEach((doc) => {
         const d = doc.data();
         if (!d.recipeId) return;
@@ -203,13 +236,7 @@ export default function App() {
         if (!groupedComments[d.recipeId]) {
           groupedComments[d.recipeId] = [];
         }
-
-        const existingIdx = groupedComments[d.recipeId].findIndex(item => item.id === doc.id);
-        if (existingIdx !== -1) {
-          groupedComments[d.recipeId][existingIdx] = c;
-        } else {
-          groupedComments[d.recipeId].push(c);
-        }
+        groupedComments[d.recipeId].push(c);
       });
 
       // Ordenar os comentários de cada receita em ordem decrescente de tempo (mais recentes no topo)
@@ -225,6 +252,9 @@ export default function App() {
       });
 
       setComments(groupedComments);
+      try {
+        localStorage.setItem("receitas_casa_comentarios", JSON.stringify(groupedComments));
+      } catch (_) {}
     }, (err) => {
       console.warn("Comentários offline ou sem conexão com Firebase:", err);
     });
@@ -249,11 +279,65 @@ export default function App() {
     return () => unsubscribeDeletedPresets();
   }, []);
 
-  // Recalcular receitas ativas combinando presets ativos + receitas remotas
+  // Determina se a receita pertence ao usuário logado ou se foi criada de forma local offline neste navegador
+  const isRecipeOwner = (rec: Recipe) => {
+    if (rec.isPreset) return false;
+    
+    // Se for uma receita criada offline local (sem userEmail e autorId)
+    const isLocalOffline = !rec.authorId && !rec.userEmail;
+    if (isLocalOffline) return true;
+
+    if (currentUser) {
+      if (currentUser.isAdmin) return true;
+      if (rec.authorId === currentUser.uid) return true;
+      if (rec.userEmail && currentUser.email && rec.userEmail.trim().toLowerCase() === currentUser.email.trim().toLowerCase()) return true;
+    }
+
+    return false;
+  };
+
+  // Recalcular receitas ativas combinando presets ativos (com avaliações locais se aplicável) + receitas remotas + receitas offline locais
   useEffect(() => {
-    const activePresets = PRESET_RECIPES.filter(p => !deletedPresetIds.includes(p.id));
-    setRecipes([...activePresets, ...remoteRecipes]);
-  }, [remoteRecipes, deletedPresetIds]);
+    const activePresets = PRESET_RECIPES.filter(p => !deletedPresetIds.includes(p.id) && !locallyDeletedIds.includes(p.id));
+    
+    // Obter as avaliações locais para os presets criados no dispositivo
+    const presetRatingsStr = localStorage.getItem("receitas_casa_preset_ratings") || "{}";
+    let presetRatings: Record<string, { rating: number, count: number }> = {};
+    try { presetRatings = JSON.parse(presetRatingsStr); } catch (_) {}
+
+    const mappedPresets = activePresets.map(p => {
+      if (presetRatings[p.id]) {
+        return {
+          ...p,
+          rating: presetRatings[p.id].rating,
+          ratingsCount: presetRatings[p.id].count
+        };
+      }
+      return p;
+    });
+
+    // Obter as receitas customizadas offline salvas no dispositivo
+    let localCustom: Recipe[] = [];
+    const savedCustomRecipes = localStorage.getItem("receitas_casa_custom");
+    if (savedCustomRecipes) {
+      try {
+        localCustom = JSON.parse(savedCustomRecipes);
+      } catch (_) {}
+    }
+
+    // Evita duplicar receitas que já existam na lista remota carregada do Firestore
+    const remoteIds = new Set(remoteRecipes.map(r => r.id));
+    const uniqueLocalCustom = localCustom.filter(r => !remoteIds.has(r.id)).map(r => {
+      return {
+        ...r,
+        authorName: r.authorName || "Cozinheiro"
+      };
+    });
+
+    const combined = [...mappedPresets, ...remoteRecipes, ...uniqueLocalCustom];
+    const filtered = combined.filter(r => !locallyDeletedIds.includes(r.id));
+    setRecipes(filtered);
+  }, [remoteRecipes, deletedPresetIds, locallyDeletedIds]);
 
   // Sincronizar dados do usuário (Custom Auth) e Favoritos correspondentes
   useEffect(() => {
@@ -269,6 +353,15 @@ export default function App() {
       } catch (_) {}
     }
   }, []);
+
+  // Sincronizar nome do criador com usuário logado
+  useEffect(() => {
+    if (currentUser && currentUser.name) {
+      setNewAuthorName(currentUser.name);
+    } else {
+      setNewAuthorName("");
+    }
+  }, [currentUser]);
 
   // Monitorar alterações de currentUser e sincronizar receitas favoritas do Firestore
   useEffect(() => {
@@ -452,60 +545,52 @@ export default function App() {
   const confirmDeleteRecipe = async (recipeId: string) => {
     try {
       const isPreset = PRESET_RECIPES.some(r => r.id === recipeId);
+      const targetRecipe = recipes.find(r => r.id === recipeId);
 
-      if (isPreset && currentUser?.isAdmin) {
-        // Apagar Preset como Admin
-        await setDoc(doc(db, "deleted_presets", recipeId), {
-          deletedAt: new Date().toISOString(),
-          recipeId: recipeId
-        });
+      // Sempre adicionar à lista de excluídas localmente para sumir imediatamente deste dispositivo
+      const updatedLocallyDeleted = [...locallyDeletedIds, recipeId];
+      setLocallyDeletedIds(updatedLocallyDeleted);
+      localStorage.setItem("receitas_casa_locally_deleted", JSON.stringify(updatedLocallyDeleted));
 
-        // Remover dos favoritos
-        if (currentUser && currentUser.uid) {
-          const favId = `${currentUser.uid}_${recipeId}`;
-          try {
-            await deleteDoc(doc(db, "favorites", favId));
-          } catch (_) {}
-        }
-        
-        if (selectedRecipe && selectedRecipe.id === recipeId) {
-          setSelectedRecipe(null);
+      // Remove de favoritos para o usuário atual
+      if (currentUser && currentUser.uid) {
+        const favId = `${currentUser.uid}_${recipeId}`;
+        try {
+          await deleteDoc(doc(db, "favorites", favId));
+        } catch (_) {}
+      } else {
+        const updatedFavs = favorites.filter(id => id !== recipeId);
+        setFavorites(updatedFavs);
+        localStorage.setItem("receitas_casa_favoritos", JSON.stringify(updatedFavs));
+      }
+
+      if (isPreset) {
+        if (currentUser?.isAdmin) {
+          // Apagar Preset definitivamente como Admin
+          await setDoc(doc(db, "deleted_presets", recipeId), {
+            deletedAt: new Date().toISOString(),
+            recipeId: recipeId
+          });
         }
       } else {
-        if (currentUser && currentUser.uid) {
-          // Se estiver logado, apagar favoritos no Firestore se existirem
-          const favId = `${currentUser.uid}_${recipeId}`;
-          try {
-            await deleteDoc(doc(db, "favorites", favId));
-          } catch (_) {}
-
-          // Apagar a receita do Firestore
-          await deleteDoc(doc(db, "recipes", recipeId));
-          
-          if (selectedRecipe && selectedRecipe.id === recipeId) {
-            setSelectedRecipe(null);
-          }
-        } else {
-          // 1. Remover de favoritos se estivesse lá (preset ou customizada)
-          const updatedFavs = favorites.filter(id => id !== recipeId);
-          setFavorites(updatedFavs);
-          localStorage.setItem("receitas_casa_favoritos", JSON.stringify(updatedFavs));
-
-          // 2. Tratar receitas customizadas do usuário
-          const savedCustom = localStorage.getItem("receitas_casa_custom");
-          const parsed: Recipe[] = savedCustom ? JSON.parse(savedCustom) : [];
-          const filteredCustom = parsed.filter(r => r.id !== recipeId);
-          localStorage.setItem("receitas_casa_custom", JSON.stringify(filteredCustom));
-          
-          // 3. Atualizar a lista de todas as receitas no estado
-          const activePresets = PRESET_RECIPES.filter(p => !deletedPresetIds.includes(p.id));
-          setRecipes([...activePresets, ...filteredCustom]);
-
-          // 4. Se a receita excluída estava aberta, voltar à lista
-          if (selectedRecipe && selectedRecipe.id === recipeId) {
-            setSelectedRecipe(null);
+        // Se for receita customizada no Firestore:
+        if (targetRecipe) {
+          const isAuthor = isRecipeOwner(targetRecipe);
+          const hasDbWriteAccess = isAuthor || currentUser?.isAdmin;
+          if (currentUser && currentUser.uid && hasDbWriteAccess) {
+            await deleteDoc(doc(db, "recipes", recipeId));
           }
         }
+
+        // Se for receita customizada offline salva localmente no localStorage
+        const savedCustom = localStorage.getItem("receitas_casa_custom");
+        const parsed: Recipe[] = savedCustom ? JSON.parse(savedCustom) : [];
+        const filteredCustom = parsed.filter(r => r.id !== recipeId);
+        localStorage.setItem("receitas_casa_custom", JSON.stringify(filteredCustom));
+      }
+
+      if (selectedRecipe && selectedRecipe.id === recipeId) {
+        setSelectedRecipe(null);
       }
     } catch (e) {
       console.error("Erro ao apagar receita", e);
@@ -566,7 +651,7 @@ export default function App() {
 
   // --- CONTROLE DE ACESSO (LOGIN / CADASTRO) COM COZINHEIRO CUSTOM AUTH ---
   // Esse sistema é 100% à prova de falhas em Android, WebViews e iframes porque não requer login externo,
-  // salvando as informações diretamente no banco Firestore na tabela cooking_users.
+  // salvando as informações diretamente no banco Firestore na tabela cooking_users, com fallback local robusto.
   const handleAuthSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setAuthFeedback(null);
@@ -585,16 +670,49 @@ export default function App() {
     }
 
     try {
-      const userDocRef = doc(db, "cooking_users", emailLower);
-      const userSnap = await getDoc(userDocRef);
+      // 1. Tentar ler no Firestore
+      let userDocRef = null;
+      let userSnap = null;
+      let databaseErrorEncountered = false;
+
+      try {
+        userDocRef = doc(db, "cooking_users", emailLower);
+        userSnap = await getDoc(userDocRef);
+      } catch (fErr) {
+        console.warn("Aviso: Conectando de forma desabilitada ou offline. Ativando contingência offline do banco:", fErr);
+        databaseErrorEncountered = true;
+      }
+
+      const nickname = authName.trim() || emailLower.split("@")[0];
+      const isAdminFlag = emailLower === "luizgustavo14102010@gmail.com";
+      const generatedUid = `user-${Date.now()}`;
 
       if (authMode === "login") {
-        if (!userSnap.exists()) {
-          setAuthFeedback("Este e-mail ainda não está cadastrado. Que tal trocar para a aba 'Criar Conta'?");
+        let userData = null;
+
+        // Se o banco de dados online respondeu normalmente
+        if (userSnap && userSnap.exists()) {
+          userData = userSnap.data();
+        } else {
+          // Fallback offline: procurar no cache de usuários locais salvos
+          const savedOfflineUsers = localStorage.getItem("receitas_casa_offline_users") || "[]";
+          let parsedOffline: any[] = [];
+          try { parsedOffline = JSON.parse(savedOfflineUsers); } catch (_) {}
+          const localMatch = parsedOffline.find(u => u.email === emailLower);
+          if (localMatch) {
+            userData = localMatch;
+          }
+        }
+
+        if (!userData) {
+          if (databaseErrorEncountered) {
+            setAuthFeedback("Você está sem conexão ou em uma aba restrita. Crie sua conta na aba 'Criar Conta' para prosseguir localmente de forma offline!");
+          } else {
+            setAuthFeedback("Este e-mail ainda não está cadastrado. Que tal trocar para a aba 'Criar Conta'?");
+          }
           return;
         }
 
-        const userData = userSnap.data();
         if (userData.password !== pass) {
           setAuthFeedback("A senha digitada está incorreta. Por favor, tente novamente com atenção!");
           return;
@@ -616,15 +734,20 @@ export default function App() {
         setAuthPassword("");
         setAuthName("");
       } else {
-        // Criar nova conta
-        if (userSnap.exists()) {
-          setAuthFeedback("Este e-mail do Google já está sendo usado por outro cozinheiro!");
+        // Criar conta (Register)
+        if (userSnap && userSnap.exists()) {
+          setAuthFeedback("Este endereço de e-mail já está sendo usado por outro cozinheiro!");
           return;
         }
 
-        const nickname = authName.trim() || emailLower.split("@")[0];
-        const isAdminFlag = emailLower === "luizgustavo14102010@gmail.com";
-        const generatedUid = `user-${Date.now()}`;
+        // Também valida no backup offline local para evitar duplicidade de e-mail no mesmo navegador
+        const savedOfflineUsers = localStorage.getItem("receitas_casa_offline_users") || "[]";
+        let parsedOffline: any[] = [];
+        try { parsedOffline = JSON.parse(savedOfflineUsers); } catch (_) {}
+        if (parsedOffline.some(u => u.email === emailLower)) {
+          setAuthFeedback("Este e-mail já foi cadastrado localmente no seu dispositivo!");
+          return;
+        }
 
         const newUserFields = {
           uid: generatedUid,
@@ -635,15 +758,23 @@ export default function App() {
           createdAt: new Date().toISOString()
         };
 
-        // Salvar cadastro no Firestore
-        await setDoc(userDocRef, newUserFields);
+        // Salvar cadastro no Firestore de forma assíncrona tolerando falhas
+        if (userDocRef) {
+          try {
+            await setDoc(userDocRef, newUserFields);
+            await setDoc(doc(db, "users", generatedUid), {
+              name: nickname,
+              email: emailLower,
+              isAdmin: isAdminFlag
+            });
+          } catch (saveErr) {
+            console.warn("Aviso de Gravação: Falha persistente ao cadastrar no servidor online. Salvando com segurança localmente.", saveErr);
+          }
+        }
 
-        // Salvar também em users legado para compatibilidade total
-        await setDoc(doc(db, "users", generatedUid), {
-          name: nickname,
-          email: emailLower,
-          isAdmin: isAdminFlag
-        });
+        // SALVA SEMPRE NO BANCO OFFLINE LOCAL para garantir compatibilidade futura e login offline
+        parsedOffline.push(newUserFields);
+        localStorage.setItem("receitas_casa_offline_users", JSON.stringify(parsedOffline));
 
         const loggedUser: AppUser = {
           uid: generatedUid,
@@ -663,12 +794,85 @@ export default function App() {
       }
     } catch (err: any) {
       console.error("Erro no Custom Auth", err);
-      setAuthFeedback(`Ocorreu um imprevisto ao acessar o banco: ${err.message || err}`);
+      const errMsg = err.message || String(err);
+      if (errMsg.includes("auth/operation-not-allowed") || errMsg.includes("operation-not-allowed") || errMsg.includes("not-allowed")) {
+        setAuthFeedback("Esta conta de e-mail ainda não existe ou o login está indisponível. Que tal clicar na aba 'Criar Conta' ali em cima para fazer o seu cadastro rapidinho? 🍳✨");
+      } else {
+        setAuthFeedback(`Ocorreu um imprevisto ao acessar o cadastro: ${errMsg}`);
+      }
     }
   };
 
-  const handleGoogleSignIn = () => {
-    setAuthFeedback("Dica: Para garantir o funcionamento perfeito em celulares e dispositivos Android, utilize os campos de e-mail e senha abaixo. Eles funcionam 100% das vezes!");
+  const handleRateRecipe = async (recipeId: string, ratingValue: number) => {
+    // Procurar a receita ativa
+    const recipe = recipes.find(r => r.id === recipeId);
+    if (!recipe) return;
+
+    // Obter o valor da nota anterior se o usuário já tiver avaliado
+    const oldRatingValue = userRatings[recipeId];
+    const originalRating = recipe.rating || 5;
+    const originalCount = recipe.ratingsCount || 1;
+
+    let newCount = originalCount;
+    let newRating = originalRating;
+
+    if (oldRatingValue !== undefined) {
+      // Se ele já avaliou e agora está clicando novamente para MUDAR a nota:
+      if (oldRatingValue === ratingValue) {
+        // Se clicar na mesma estrela, não faz nada
+        return;
+      }
+      // O contador não sobe porque é o mesmo usuário mudando de ideia, apenas reajustamos a média
+      const totalScore = originalRating * originalCount;
+      newRating = parseFloat(((totalScore - oldRatingValue + ratingValue) / originalCount).toFixed(1));
+    } else {
+      // Se for a primeira vez avaliando este prato:
+      newCount = originalCount + 1;
+      newRating = parseFloat(((originalRating * originalCount + ratingValue) / newCount).toFixed(1));
+    }
+
+    if (!recipe.isPreset) {
+      // Se for receita customizada no Firestore
+      try {
+        await setDoc(doc(db, "recipes", recipeId), {
+          rating: newRating,
+          ratingsCount: newCount
+        }, { merge: true });
+        
+        // Atualizar estado local de receitas e detalhes imediatamente
+        setRemoteRecipes(prev => prev.map(r => r.id === recipeId ? { ...r, rating: newRating, ratingsCount: newCount } : r));
+        setSelectedRecipe(prev => prev && prev.id === recipeId ? { ...prev, rating: newRating, ratingsCount: newCount } : prev);
+        setRecipes(prev => prev.map(r => r.id === recipeId ? { ...r, rating: newRating, ratingsCount: newCount } : r));
+      } catch (err) {
+        console.error("Erro ao registrar avaliação online:", err);
+      }
+    } else {
+      // Se for Preset, salvamos o rating localmente na lista de presets avaliados
+      const presetRatingsStr = localStorage.getItem("receitas_casa_preset_ratings") || "{}";
+      let presetRatings: Record<string, { rating: number, count: number }> = {};
+      try { presetRatings = JSON.parse(presetRatingsStr); } catch (_) {}
+      
+      presetRatings[recipeId] = { rating: newRating, count: newCount };
+      localStorage.setItem("receitas_casa_preset_ratings", JSON.stringify(presetRatings));
+
+      // Atualizar no estado local forçando repintura imediata
+      setSelectedRecipe(prev => prev && prev.id === recipeId ? { ...prev, rating: newRating, ratingsCount: newCount } : prev);
+      setRecipes(prev => prev.map(r => r.id === recipeId ? { ...r, rating: newRating, ratingsCount: newCount } : r));
+    }
+
+    // Atualizar no estado e no localStorage das avaliações do usuário
+    const newUserRatings = { ...userRatings, [recipeId]: ratingValue };
+    setUserRatings(newUserRatings);
+    localStorage.setItem("receitas_casa_user_ratings", JSON.stringify(newUserRatings));
+
+    // Salvar na lista de avaliados localmente para retrocompatibilidade
+    const ratedRecipesStr = localStorage.getItem("receitas_casa_rated_list") || "[]";
+    let ratedList: string[] = [];
+    try { ratedList = JSON.parse(ratedRecipesStr); } catch (_) {}
+    if (!ratedList.includes(recipeId)) {
+      ratedList.push(recipeId);
+      localStorage.setItem("receitas_casa_rated_list", JSON.stringify(ratedList));
+    }
   };
 
   const handleLogout = () => {
@@ -721,6 +925,10 @@ export default function App() {
       ? currentUser.name 
       : (tempCommenterName.trim() || "Visitante");
 
+    // Aplicar filtro de segurança contra palavrões e expressões ofensivas
+    const sanitizedText = filterBadWords(commentTextToSave);
+    const sanitizedAuthor = filterBadWords(commenterName);
+
     const timestampStr = new Date().toLocaleDateString("pt-BR", {
       day: "2-digit",
       month: "2-digit",
@@ -733,8 +941,8 @@ export default function App() {
 
     const newCommentObj: RecipeComment = {
       id: commentId,
-      author: commenterName,
-      text: commentTextToSave,
+      author: sanitizedAuthor,
+      text: sanitizedText,
       timestamp: timestampStr,
       userEmail: currentUser ? currentUser.email : "Visitante (Sem Conta)",
       recipeId
@@ -766,13 +974,19 @@ export default function App() {
 
     setNewCommentText("");
 
+    const updatedLocalComments = [...locallyCreatedCommentIds, commentId];
+    setLocallyCreatedCommentIds(updatedLocalComments);
+    try {
+      localStorage.setItem("receitas_casa_my_written_comments", JSON.stringify(updatedLocalComments));
+    } catch (_) {}
+
     // 3. Enviar gravação em background assíncrono para o Firestore na nuvem
     try {
       await setDoc(doc(db, "comments", commentId), {
         id: commentId,
         recipeId,
-        author: commenterName,
-        text: commentTextToSave,
+        author: sanitizedAuthor,
+        text: sanitizedText,
         timestamp: timestampStr,
         userEmail: currentUser ? currentUser.email : "Visitante (Sem Conta)",
         createdAt: serverTimestamp()
@@ -783,18 +997,23 @@ export default function App() {
   };
 
   const handleDeleteComment = async (recipeId: string, commentId: string) => {
+    // Feedback visual imediato antes da resposta do servidor
+    setComments((prev) => {
+      const updated = { ...prev };
+      if (updated[recipeId]) {
+        updated[recipeId] = updated[recipeId].filter(c => c.id !== commentId);
+      }
+      try {
+        localStorage.setItem("receitas_casa_comentarios", JSON.stringify(updated));
+      } catch (_) {}
+      return updated;
+    });
+
     if (currentUser && currentUser.uid) {
       try {
         await deleteDoc(doc(db, "comments", commentId));
       } catch (err) {
         handleFirestoreError(err, OperationType.DELETE, `comments/${commentId}`);
-      }
-    } else {
-      const updatedComments = { ...comments };
-      if (updatedComments[recipeId]) {
-        updatedComments[recipeId] = updatedComments[recipeId].filter(c => c.id !== commentId);
-        setComments(updatedComments);
-        localStorage.setItem("receitas_casa_comentarios", JSON.stringify(updatedComments));
       }
     }
   };
@@ -828,10 +1047,17 @@ export default function App() {
         return;
       }
 
-      // Se for publicar de forma pública, exige foto
+      // Se for publicar de forma pública, exige foto e o nome do criador
       if (newIsPublic && !newImageUrl.trim()) {
         setFormFeedback(
           "Para publicar a receita de forma pública para todos verem, você precisa adicionar uma linda foto do seu prato! 📸 Se não tiver foto agora, clique em '🔒 SÓ NO CADERNO' para guardar de forma particular no seu caderno de receitas."
+        );
+        return;
+      }
+
+      if (!newAuthorName.trim()) {
+        setFormFeedback(
+          "Atenção: Você precisa preencher o campo 'Seu nome ou apelido (Criador da receita)'! 👵 Assim todos saberão quem criou ou adaptou essa delícia."
         );
         return;
       }
@@ -872,7 +1098,7 @@ export default function App() {
           rating: newRatingSetting || 5.0,
           ratingsCount: 1,
           authorId: currentUser.uid,
-          authorName: currentUser.name || "Cozinheiro",
+          authorName: newAuthorName.trim() || currentUser.name || "Cozinheiro",
           isPublic: newIsPublic,
           userEmail: currentUser.email,
           createdAt: serverTimestamp(),
@@ -902,7 +1128,9 @@ export default function App() {
           rating: newRatingSetting || 5.0,
           ratingsCount: 1,
           isPublic: newIsPublic,
-          userEmail: undefined
+          userEmail: undefined,
+          authorId: undefined,
+          authorName: newAuthorName.trim() || "Cozinheiro"
         };
 
         const savedCustom = localStorage.getItem("receitas_casa_custom");
@@ -963,6 +1191,15 @@ export default function App() {
 
   // --- FILTRAR RECEITAS CATEGORIA E BUSCA ---
   const filteredRecipes = recipes.filter(recipe => {
+    // Esconder receitas apagadas pelo usuário localmente ou removidas remotamente
+    if (locallyDeletedIds.includes(recipe.id) || deletedPresetIds.includes(recipe.id)) {
+      return false;
+    }
+
+    // Ocultar receitas privadas criadas por outros cozinheiros (de qualquer outro usuário ou visitante)
+    const isAllowed = recipe.isPreset || recipe.isPublic !== false || isRecipeOwner(recipe);
+    if (!isAllowed) return false;
+
     const matchesCategory = selectedCategory ? recipe.category === selectedCategory : true;
     const matchesSearch = searchQuery.trim() !== "" 
       ? recipe.title.toLowerCase().includes(searchQuery.toLowerCase()) || 
@@ -973,9 +1210,17 @@ export default function App() {
 
   // Receitas Favoritas/Customizadas do usuário
   const mySavedRecipes = recipes.filter(recipe => {
-    const isCustom = !recipe.isPreset && (!recipe.authorId || !currentUser || recipe.authorId === currentUser.uid);
-    const isFav = favorites.includes(recipe.id);
-    return isCustom || isFav;
+    // Esconder receitas apagadas pelo usuário localmente ou removidas remotamente
+    if (locallyDeletedIds.includes(recipe.id) || deletedPresetIds.includes(recipe.id)) {
+      return false;
+    }
+
+    // Se for Preset do app, só aparece se foi adicionada aos favoritos pelo usuário
+    if (recipe.isPreset) {
+      return favorites.includes(recipe.id);
+    }
+    // Caso contrário, se for customizada (criada pelo próprio usuário no Firestore ou offline local)
+    return isRecipeOwner(recipe);
   });
 
   // Classes dinâmicas de tamanho de fonte baseado em acessibilidade com Space Grotesk nos títulos
@@ -1102,7 +1347,7 @@ export default function App() {
                 )}
 
                 {/* Opção de Publicar para todos ou Privar (Apenas se for receita do usuário) */}
-                {!selectedRecipe.isPreset && (
+                {!selectedRecipe.isPreset && isRecipeOwner(selectedRecipe) && (
                   <div className="bg-[#FAF6EE] border-4 border-[#3C3633] rounded-[24px] p-4.5 space-y-3 shadow-[4px_4px_0px_0px_rgba(60,54,51,1)] text-left animate-fadeIn">
                     <div className="flex items-start gap-2.5">
                       <span className="text-2xl mt-0.5">
@@ -1167,6 +1412,15 @@ export default function App() {
                     <h2 className={`${getFontSizeClass("titulo-principal")} text-[#3C3633]`}>
                       {selectedRecipe.title}
                     </h2>
+                    <p className="text-xs font-bold text-[#708238] mt-1.5 flex items-center gap-1.5 uppercase tracking-wider">
+                      {selectedRecipe.isPreset ? (
+                        <>💝 Receita Original do Aplicativo</>
+                      ) : (
+                        <>
+                          🧑‍🍳 Criado por: <span className="font-black text-[#3C3633] underline decoration-[#708238]/40 decoration-2">{selectedRecipe.authorName || "Cozinheiro"}</span>
+                        </>
+                      )}
+                    </p>
                   </div>
                   <button 
                     id={`btn-fav-detail-${selectedRecipe.id}`}
@@ -1196,6 +1450,82 @@ export default function App() {
                       <p className="text-sm font-black text-[#3C3633]">{selectedRecipe.portions}</p>
                     </div>
                   </div>
+                </div>
+
+                {/* AVALIE ESTE PRATO (Nota de Cozinheiro) */}
+                <div className="bg-[#FAF6EE] border-4 border-[#3C3633] rounded-[24px] p-4.5 space-y-3 text-left shadow-[3px_3px_0px_0px_rgba(60,54,51,1)] animate-fadeIn">
+                  <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+                    <div>
+                      <h4 className="font-display font-black text-xs text-[#3C3633] uppercase tracking-wide flex items-center gap-1">
+                        ⭐ Avaliar esta Receita
+                      </h4>
+                      
+                      {/* O nome do autor (quem fez) */}
+                      <p className="text-[10px] text-gray-500 font-bold leading-tight mt-1">
+                        Prato de: <span className="text-[#3C3633] font-black">{selectedRecipe.isPreset ? "Vovó (Original)" : (selectedRecipe.authorName || "Cozinheiro")}</span>
+                      </p>
+                      
+                      {/* Nota atual e contagem */}
+                      <p className="text-[10px] text-gray-500 font-bold leading-tight mt-0.5">
+                        Nota atual: <span className="text-[#708238] font-black">{selectedRecipe.rating || "5.0"} ⭐</span> ({selectedRecipe.ratingsCount || 1} {selectedRecipe.ratingsCount === 1 ? "voto" : "votos"})
+                      </p>
+                    </div>
+                    
+                    {/* Estrelas interativas com Hover e Seleção Alternável */}
+                    <div className="flex items-center gap-0.5">
+                      {[1, 2, 3, 4, 5].map((starValue) => {
+                        const userRating = userRatings[selectedRecipe.id];
+                        // Se estiver passando o mouse, visualiza o hover; senão, mostra a nota do usuário; senão, mostra a média atual
+                        const displayRating = hoveredStar !== null 
+                          ? hoveredStar 
+                          : (userRating !== undefined ? userRating : 0);
+                        
+                        const isStarred = starValue <= displayRating;
+                        
+                        return (
+                          <button
+                            key={starValue}
+                            onClick={() => handleRateRecipe(selectedRecipe.id, starValue)}
+                            onMouseEnter={() => setHoveredStar(starValue)}
+                            onMouseLeave={() => setHoveredStar(null)}
+                            className="p-1 rounded-lg transition-transform hover:scale-125 cursor-pointer active:scale-95"
+                            title={`Avaliar com nota ${starValue}`}
+                          >
+                            <Star 
+                              className={`h-6 w-6 transition-all duration-150 ${
+                                isStarred 
+                                  ? 'fill-amber-400 text-amber-500 scale-110 drop-shadow-[0_1.5px_3px_rgba(245,158,11,0.4)] opacity-100' 
+                                  : 'text-gray-300 stroke-[#3C3633] stroke-[1px] opacity-25'
+                              }`} 
+                            />
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+
+                  {/* Nome Cadastrado ou de quem está avaliando */}
+                  <div className="border-t border-gray-200/60 pt-2 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-1 text-[10px] text-gray-400 font-bold">
+                    <span>
+                      Sua avaliação como: <strong className="text-[#708238]">{currentUser ? `${currentUser.name} 👤` : "Visitante (Sem Conta) 👤"}</strong>
+                    </span>
+                    {userRatings[selectedRecipe.id] !== undefined && (
+                      <span className="text-[9px] bg-[#708238]/10 text-[#708238] py-0.5 px-2 rounded-lg font-black border border-[#708238]/20">
+                        Sua nota dada: {userRatings[selectedRecipe.id]} Estrelas ⭐
+                      </span>
+                    )}
+                  </div>
+                  
+                  {/* Mensagem dinâmica com possibilidade de alterar */}
+                  {userRatings[selectedRecipe.id] !== undefined ? (
+                    <p className="text-[9px] text-[#708238] font-black uppercase tracking-wider text-center bg-[#708238]/10 py-1.5 rounded-lg border border-[#708238]/20">
+                      Sua avaliação foi registrada! Quer alterar? É só clicar em outra estrela 🍳💝
+                    </p>
+                  ) : (
+                    <p className="text-[9px] text-gray-400 font-bold text-center">
+                      Passe o mouse ou toque para escolher a nota e clique para confirmar!
+                    </p>
+                  )}
                 </div>
 
                 {/* SELETOR DE MODO DE VISUALIZAÇÃO - BENTO GRID ESTILO RÍGIDO */}
@@ -1366,8 +1696,8 @@ export default function App() {
                               </span>
                             </div>
                             
-                            {/* Opção de Excluir Comentário (Admin ou o próprio autor do comentário) */}
-                            {(currentUser?.isAdmin || (currentUser && currentUser.email === comment.userEmail)) && (
+                            {/* Opção de Excluir Comentário (Admin, próprio autor logado ou se foi criado por este aparelho) */}
+                            {(currentUser?.isAdmin || (currentUser && currentUser.email === comment.userEmail) || locallyCreatedCommentIds.includes(comment.id)) && (
                               <button
                                 type="button"
                                 onClick={() => handleDeleteComment(selectedRecipe.id, comment.id)}
@@ -1430,7 +1760,7 @@ export default function App() {
                 </div>
 
                 {/* Excluir Receita (se for do usuário ou administrador) */}
-                {((!selectedRecipe.isPreset && (!selectedRecipe.userEmail || (currentUser && selectedRecipe.userEmail === currentUser.email))) || currentUser?.isAdmin) && (
+                {selectedRecipe && (
                   <div className="pt-2 border-t-2 border-[#F5F2ED] flex justify-end">
                     <button
                       id={`btn-delete-recipe-${selectedRecipe.id}`}
@@ -1438,7 +1768,7 @@ export default function App() {
                       className="py-2.5 px-4 bg-[#FFEBE6] border-2 border-[#FFA3A3] hover:bg-red-50 text-red-800 rounded-xl text-xs font-black tracking-wide flex items-center gap-1.5 active:scale-95 transition-transform cursor-pointer"
                     >
                       <Trash2 className="h-4 w-4" />
-                      {currentUser?.isAdmin ? "APAGAR (ADMINISTRADOR)" : "APAGAR ESTA RECEITA"}
+                      {selectedRecipe.isPreset ? "APAGAR RECEITA (FÁBRICA)" : "APAGAR ESTA RECEITA"}
                     </button>
                   </div>
                 )}
@@ -1531,7 +1861,9 @@ export default function App() {
 
                                 {!recipe.isPreset && (
                                   <span className="absolute bottom-1.5 right-1.5 bg-[#708238] border-2 border-[#3C3633] text-white text-[8px] font-black px-1.5 py-0.5 rounded-md uppercase tracking-wider shadow-[2px_2px_0px_0px_rgba(60,54,51,1)]">
-                                    Minha {recipe.isPublic !== false ? "🌍" : "🔒"}
+                                    {isRecipeOwner(recipe) 
+                                      ? `Minha ${recipe.isPublic !== false ? "🌍" : "🔒"}` 
+                                      : `De: ${recipe.authorName || "Cozinheiro"} 🌍`}
                                   </span>
                                 )}
                               </div>
@@ -1791,6 +2123,28 @@ export default function App() {
                       </div>
                     </div>
 
+                    {/* Campo: Nome do Criador / Autor */}
+                    <div className="space-y-1.5 text-left bg-white border-4 border-[#3C3633] rounded-[24px] p-4.5 shadow-[2px_2px_0px_0px_rgba(60,54,51,0.1)]">
+                      <label className="text-sm font-black text-[#3C3633] block font-display tracking-wide uppercase" htmlFor="input-autor">
+                        6. Quem escreveu esta delícia? (Nome do Criador)
+                      </label>
+                      <input 
+                        id="input-autor"
+                        type="text"
+                        value={newAuthorName}
+                        onChange={(e) => setNewAuthorName(e.target.value)}
+                        placeholder="Ex: Vovó Maria, Luiz Gustavo..."
+                        maxLength={50}
+                        className="w-full p-4 bg-white border-4 border-[#3C3633] rounded-2xl text-base font-extrabold focus:border-[#708238] transition-all"
+                        required
+                      />
+                      <p className="text-[11px] text-[#3C3633]/80 font-bold leading-relaxed">
+                        {newIsPublic 
+                          ? "⭐ Identificação Pública: Como você escolheu Publicar para Todos, seu nome aparecerá em destaque para sabermos quem criou esta obra de arte!" 
+                          : "Seu nome será guardado no seu caderno particular junto com a receita."}
+                      </p>
+                    </div>
+
                     {/* Botão de Enviar gigante */}
                     {formFeedback && (
                       <div className="bg-[#FFEBE6] border-4 border-[#3C3633] p-4 rounded-2xl text-red-800 text-xs font-black flex items-center gap-2 shadow-[3px_3px_0px_0px_rgba(60,54,51,1)] animate-fadeIn">
@@ -1863,13 +2217,13 @@ export default function App() {
                             className="w-full bg-white border-4 border-[#3C3633] p-5 rounded-[28px] hover:border-[#708238] cursor-pointer shadow-[4px_4px_0px_0px_rgba(60,54,51,1)] flex flex-col relative overflow-hidden animate-none"
                           >
                             {/* Badges de Destaque */}
-                            {!recipe.isPreset ? (
+                            {(!recipe.isPreset && isRecipeOwner(recipe)) ? (
                               <span className="absolute top-0 right-0 bg-[#C18C5D] text-white text-[9px] font-black px-3.5 py-1 rounded-bl-xl uppercase tracking-wider border-l border-b border-[#3C3633]/30">
                                 Criação Minha
                               </span>
                             ) : (
                               <span className="absolute top-0 right-0 bg-[#A0352A] text-white text-[9px] font-black px-3.5 py-1 rounded-bl-xl uppercase tracking-wider border-l border-b border-[#3C3633]/30">
-                                Favorita ❤️
+                                Favorita ❤️ {(!recipe.isPreset && recipe.authorName) ? `(por: ${recipe.authorName})` : ''}
                               </span>
                             )}
 
@@ -1987,11 +2341,6 @@ export default function App() {
           >
             <div className={`w-12 h-12 rounded-xl flex items-center justify-center border-2 transition-all relative ${activeTab === "minhas_receitas" ? "bg-[#708238]/15 border-[#708238] shadow-[2px_2px_0px_0px_rgba(112,130,56,1)]" : "bg-[#3C3633]/5 border-[#3c3633]/30 opacity-60"}`}>
               <Heart className={`h-6 w-6 stroke-[3px] ${activeTab === "minhas_receitas" ? "text-red-700" : "text-[#3C3633]"}`} />
-              {mySavedRecipes.length > 0 && (
-                <span className="absolute -top-1.5 -right-1.5 bg-[#A0352A] border border-[#3C3633] text-white text-[9px] font-black rounded-full w-5 h-5 flex items-center justify-center shadow-sm">
-                  {mySavedRecipes.length}
-                </span>
-              )}
             </div>
             <span className={`text-[11px] font-black mt-1 uppercase tracking-wider ${activeTab === "minhas_receitas" ? "text-[#708238]" : "text-[#3C3633]/60"}`}>
               Caderno
@@ -2011,14 +2360,12 @@ export default function App() {
             
             <div className="space-y-2">
               <h3 className="font-display font-black text-lg text-[#3C3633] uppercase">
-                {recipes.find(r => r.id === recipeToDelete)?.isPreset ? "Remover Favorito?" : currentUser?.isAdmin && recipes.find(r => r.id === recipeToDelete)?.authorId !== currentUser?.uid ? "Excluir como Admin?" : "Confirmar Exclusão?"}
+                {recipes.find(r => r.id === recipeToDelete)?.isPreset ? "Apagar de Fábrica?" : "Confirmar Exclusão?"}
               </h3>
-              <p className="text-sm text-gray-600 font-bold leading-relaxed">
+              <p className="text-sm text-gray-600 font-bold leading-relaxed font-sans">
                 {recipes.find(r => r.id === recipeToDelete)?.isPreset 
-                  ? "Você quer mesmo tirar essa receita do seu caderno de favoritos? Ela continuará guardada na lista de pratos geral." 
-                  : currentUser?.isAdmin && recipes.find(r => r.id === recipeToDelete)?.authorId !== currentUser?.uid
-                    ? "Você tem permissões de Administrador (Vovó Admin). Tem certeza de que quer apagar definitivamente esta receita do sistema? Essa ação não pode ser desfeita!"
-                    : "Você tem certeza de que deseja apagar essa receita criada por você? Essa ação não pode ser desfeita!"}
+                  ? "Você tem certeza de que deseja apagar essa receita de fábrica? Ela não será mais exibida no seu aplicativo imediatamente." 
+                  : "Você deseja apagar essa receita do seu aplicativo? Ela será removida da sua visão imediatamente de forma definitiva."}
               </p>
             </div>
 
@@ -2211,7 +2558,7 @@ export default function App() {
                   </h3>
                   <p className="text-xs text-gray-500 font-bold leading-relaxed max-w-xs mx-auto">
                     {authMode === "login" 
-                      ? "Acesse seu caderno com seu e-mail do Google e senha!" 
+                      ? "Acesse seu caderno com seu e-mail de acesso e senha!" 
                       : "Crie sua conta rapidinho com e-mail e escolha uma senha!"}
                   </p>
                 </div>
@@ -2240,8 +2587,8 @@ export default function App() {
                   </span>
                   <p className="text-[10px] text-[#3C3633] font-bold leading-normal">
                     {authMode === "login"
-                      ? "Se você já criou a sua conta anteriormente, basta preencher seu e-mail do Google cadastrado e a sua senha de acesso abaixo!"
-                      : "Digite seu e-mail do Google (or qualquer e-mail) e escolha uma senha de 6 dígitos. Funciona perfeitamente em qualquer celular!"}
+                      ? "Se você já criou a sua conta anteriormente, basta preencher seu e-mail cadastrado e a sua senha de acesso abaixo!"
+                      : "Digite seu e-mail principal e escolha uma senha de 6 dígitos. Funciona perfeitamente em qualquer celular!"}
                   </p>
                   <p className="text-[9px] text-[#708238] font-black uppercase pt-1">
                     ⭐ Conecte-se para salvar e gerenciar suas receitas preferidas!
@@ -2267,7 +2614,7 @@ export default function App() {
 
                   <div className="space-y-1">
                     <label className="text-[10px] font-black text-[#3C3633] uppercase tracking-wide block">
-                      E-mail do Google:
+                      E-mail de Cadastro:
                     </label>
                     <input
                       type="email"
