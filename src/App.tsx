@@ -205,7 +205,7 @@ export default function App() {
           instructions: data.instructions || [],
           isPreset: false,
           imageUrl: data.imageUrl,
-          rating: data.rating || 5,
+          rating: Math.min(5, Math.max(1, data.rating || 5)),
           ratingsCount: data.ratingsCount || 1,
           isPublic: data.isPublic !== false,
           userEmail: data.userEmail || data.email,
@@ -312,7 +312,7 @@ export default function App() {
       if (presetRatings[p.id]) {
         return {
           ...p,
-          rating: presetRatings[p.id].rating,
+          rating: Math.min(5, Math.max(1, presetRatings[p.id].rating)),
           ratingsCount: presetRatings[p.id].count
         };
       }
@@ -338,7 +338,7 @@ export default function App() {
     });
 
     const combined = [...mappedPresets, ...remoteRecipes, ...uniqueLocalCustom];
-    const filtered = combined.filter(r => !locallyDeletedIds.includes(r.id));
+    const filtered = combined.filter(r => !locallyDeletedIds.includes(r.id) && !deletedPresetIds.includes(r.id));
     setRecipes(filtered);
   }, [remoteRecipes, deletedPresetIds, locallyDeletedIds]);
 
@@ -585,6 +585,14 @@ export default function App() {
           }
         }
 
+        // Se quem está deletando for Admin, registrar no "deleted_presets" de doadores para sumir de todos os outros dispositivos na hora!
+        if (currentUser?.isAdmin) {
+          await setDoc(doc(db, "deleted_presets", recipeId), {
+            deletedAt: new Date().toISOString(),
+            recipeId: recipeId
+          });
+        }
+
         // Se for receita customizada offline salva localmente no localStorage
         const savedCustom = localStorage.getItem("receitas_casa_custom");
         const parsed: Recipe[] = savedCustom ? JSON.parse(savedCustom) : [];
@@ -813,7 +821,7 @@ export default function App() {
 
     // Obter o valor da nota anterior se o usuário já tiver avaliado
     const oldRatingValue = userRatings[recipeId];
-    const originalRating = recipe.rating || 5;
+    const originalRating = Math.min(5, Math.max(1, recipe.rating || 5));
     const originalCount = recipe.ratingsCount || 1;
 
     let newCount = originalCount;
@@ -833,6 +841,9 @@ export default function App() {
       newCount = originalCount + 1;
       newRating = parseFloat(((originalRating * originalCount + ratingValue) / newCount).toFixed(1));
     }
+
+    // Limitar estritamente a no máximo 5 estrelas e no mínimo 1 estrela para não quebrar limites visuais
+    newRating = Math.min(5, Math.max(1, newRating));
 
     if (!recipe.isPreset) {
       // Se for receita customizada no Firestore
@@ -1121,7 +1132,7 @@ export default function App() {
           ingredients: ingredientsArray,
           instructions: instructionsArray,
           imageUrl: newImageUrl || fallbackImages[newCategoryToSave] || "https://images.unsplash.com/photo-1504674900247-0877df9cc836?auto=format&fit=crop&q=80&w=600",
-          rating: newRatingSetting || 5.0,
+          rating: Math.min(5, newRatingSetting || 5.0),
           ratingsCount: 1,
           authorId: currentUser.uid,
           authorName: finalAuthorName,
@@ -1151,7 +1162,7 @@ export default function App() {
           instructions: instructionsArray,
           isPreset: false,
           imageUrl: newImageUrl || fallbackImages[newCategoryToSave] || "https://images.unsplash.com/photo-1504674900247-0877df9cc836?auto=format&fit=crop&q=80&w=600",
-          rating: newRatingSetting || 5.0,
+          rating: Math.min(5, newRatingSetting || 5.0),
           ratingsCount: 1,
           isPublic: newIsPublic,
           userEmail: undefined,
@@ -1496,7 +1507,7 @@ export default function App() {
                       
                       {/* Nota atual e contagem */}
                       <p className="text-[10px] text-gray-500 font-bold leading-tight mt-0.5">
-                        Nota atual: <span className="text-[#708238] font-black">{selectedRecipe.rating || "5.0"} ⭐</span> ({selectedRecipe.ratingsCount || 1} {selectedRecipe.ratingsCount === 1 ? "voto" : "votos"})
+                        Nota atual: <span className="text-[#708238] font-black">{Math.min(5, Number(selectedRecipe.rating || 5)).toFixed(1)} ⭐</span> ({selectedRecipe.ratingsCount || 1} {selectedRecipe.ratingsCount === 1 ? "voto" : "votos"})
                       </p>
                     </div>
                     
@@ -1874,7 +1885,7 @@ export default function App() {
                                 {/* Nota de Avaliação (Estrelas da Vó) */}
                                 <div className="absolute top-2 left-2 bg-white border-2 border-[#3C3633] px-2 py-0.5 rounded-lg flex items-center gap-1 shadow-[2px_2px_0px_0px_rgba(60,54,51,1)] z-10">
                                   <Star className="h-3.5 w-3.5 text-amber-500 fill-amber-500 stroke-[#3C3633] stroke-[1px]" />
-                                  <span className="text-[11px] font-black text-[#3C3633]">{recipe.rating || 5.0}</span>
+                                  <span className="text-[11px] font-black text-[#3C3633]">{Math.min(5, Number(recipe.rating || 5)).toFixed(1)}</span>
                                 </div>
 
                                 {/* Botão de Coração */}
