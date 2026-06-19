@@ -127,6 +127,7 @@ export default function App() {
   const [newAuthorName, setNewAuthorName] = useState("");
   const [newRatingSetting, setNewRatingSetting] = useState(5);
   const [formFeedback, setFormFeedback] = useState<string | null>(null);
+  const [recipeDetailFeedback, setRecipeDetailFeedback] = useState<string | null>(null);
 
   // --- SISTEMA DE CONTAS & COMENTÁRIOS ---
   const [currentUser, setCurrentUser] = useState<AppUser | null>(null);
@@ -503,6 +504,7 @@ export default function App() {
   useEffect(() => {
     setCheckedIngredients({});
     setCurrentStepIndex(0);
+    setRecipeDetailFeedback(null);
   }, [selectedRecipe, activeTab, selectedCategory]);
 
   // --- FAVORITAR RECEITA ---
@@ -610,6 +612,7 @@ export default function App() {
 
   // --- ALTERAR PRIVACIDADE DA RECEITA (PÚBLICA / PRIVADA) ---
   const handleTogglePrivacy = async (recipeId: string) => {
+    setRecipeDetailFeedback(null);
     try {
       if (currentUser && currentUser.uid) {
         const recipeRef = doc(db, "recipes", recipeId);
@@ -617,23 +620,48 @@ export default function App() {
         if (recipeDoc.exists()) {
           const data = recipeDoc.data();
           const currentPublic = data.isPublic !== false;
+          const targetPublic = !currentPublic;
+
+          // REGRA DE NEGÓCIO: Se for passar de Privada para Pública, exige que tenha foto real (starts with data:image/)
+          if (targetPublic) {
+            const hasRealPhoto = data.imageUrl && data.imageUrl.startsWith("data:image/");
+            if (!hasRealPhoto) {
+              setRecipeDetailFeedback("⚠️ Ops! Para publicar esta receita de forma pública para todos verem, você PRECISA adicionar uma foto real do seu prato! Envie uma foto carinhosamente usando o painel de upload abaixo.");
+              return;
+            }
+          }
+
           await setDoc(recipeRef, {
             ...data,
-            isPublic: !currentPublic,
+            isPublic: targetPublic,
             updatedAt: serverTimestamp()
           });
           
           if (selectedRecipe && selectedRecipe.id === recipeId) {
-            setSelectedRecipe(prev => prev ? { ...prev, isPublic: !currentPublic } : null);
+            setSelectedRecipe(prev => prev ? { ...prev, isPublic: targetPublic } : null);
           }
         }
       } else {
         const savedCustom = localStorage.getItem("receitas_casa_custom");
         if (savedCustom) {
           const parsed: Recipe[] = JSON.parse(savedCustom);
+          
+          const targetRecipe = parsed.find(r => r.id === recipeId);
+          if (targetRecipe) {
+            const currentPublic = targetRecipe.isPublic !== false;
+            const targetPublic = !currentPublic;
+            
+            if (targetPublic) {
+              const hasRealPhoto = targetRecipe.imageUrl && targetRecipe.imageUrl.startsWith("data:image/");
+              if (!hasRealPhoto) {
+                setRecipeDetailFeedback("⚠️ Ops! Para publicar esta receita de forma pública para todos verem, você PRECISA adicionar uma foto real do seu prato! Envie uma foto carinhosamente usando o painel de upload abaixo.");
+                return;
+              }
+            }
+          }
+
           const updated = parsed.map(r => {
             if (r.id === recipeId) {
-              // Se r.isPublic estiver undefined, assume true por padrão, então inverte para false
               const currentPublic = r.isPublic !== false; 
               const toggledPublic = !currentPublic;
               
@@ -656,8 +684,83 @@ export default function App() {
         }
       }
     } catch (e) {
-      console.error("Erro ao alterar privacidade", e);
+      console.error("Erro ao apagar receita", e);
     }
+  };
+
+  // --- ENVIAR OU ALTERAR FOTO REAL DE UMA RECEITA NO CADERNO ---
+  const handleUpdateRecipePhoto = async (recipeId: string, e: React.ChangeEvent<HTMLInputElement>) => {
+    setRecipeDetailFeedback(null);
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      const img = new Image();
+      img.onload = async () => {
+        const canvas = document.createElement("canvas");
+        const MAX_WIDTH = 450;
+        const scaleSize = MAX_WIDTH / img.width;
+        canvas.width = MAX_WIDTH;
+        canvas.height = img.height * scaleSize;
+        
+        const ctx = canvas.getContext("2d");
+        if (ctx) {
+          ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+          // Compressão de qualidade para base64 JPEG
+          const compressedBase64 = canvas.toDataURL("image/jpeg", 0.65);
+
+          try {
+            if (currentUser && currentUser.uid) {
+              const recipeRef = doc(db, "recipes", recipeId);
+              const recipeDoc = await getDoc(recipeRef);
+              if (recipeDoc.exists()) {
+                const data = recipeDoc.data();
+                await setDoc(recipeRef, {
+                  ...data,
+                  imageUrl: compressedBase64,
+                  updatedAt: serverTimestamp()
+                });
+                
+                // Atualizar estado da receita selecionada
+                if (selectedRecipe && selectedRecipe.id === recipeId) {
+                  setSelectedRecipe(prev => prev ? { ...prev, imageUrl: compressedBase64 } : null);
+                }
+                setRecipeDetailFeedback("Sua foto real do prato foi guardada com amor! 📸✨");
+              }
+            } else {
+              const savedCustom = localStorage.getItem("receitas_casa_custom");
+              if (savedCustom) {
+                const parsed: Recipe[] = JSON.parse(savedCustom);
+                const updated = parsed.map(r => {
+                  if (r.id === recipeId) {
+                    return { ...r, imageUrl: compressedBase64 };
+                  }
+                  return r;
+                });
+                localStorage.setItem("receitas_casa_custom", JSON.stringify(updated));
+                
+                // Atualizar listagem
+                setRecipes([...PRESET_RECIPES, ...updated]);
+
+                if (selectedRecipe && selectedRecipe.id === recipeId) {
+                  const currentUpdated = updated.find(r => r.id === recipeId);
+                  if (currentUpdated) {
+                    setSelectedRecipe(currentUpdated);
+                  }
+                }
+                setRecipeDetailFeedback("Sua foto real do prato foi guardada localmente! 📸✨");
+              }
+            }
+          } catch (errUpdate) {
+            console.error("Erro ao atualizar foto real", errUpdate);
+            setRecipeDetailFeedback("Eita! Ocorreu um contratempo ao gravar sua foto. Tente de novo!");
+          }
+        }
+      };
+      img.src = event.target?.result as string;
+    };
+    reader.readAsDataURL(file);
   };
 
   // --- CONTROLE DE ACESSO (LOGIN / CADASTRO) COM COZINHEIRO CUSTOM AUTH ---
@@ -1032,6 +1135,60 @@ export default function App() {
     }
   };
 
+  // --- 50 DESCRIÇÕES PRE-FEITAS COM CARINHO DE VÓ ---
+  const PREMADE_DESCRIPTIONS = [
+    "Uma verdadeira lindeza caseira preparada com muito carinho e ingredientes especiais!",
+    "Aquele aroma maravilhoso que abraça a casa inteira e reúne todo mundo ao redor da mesa.",
+    "Uma gostosura autêntica que conforta o coração e esquenta a alma de toda a família.",
+    "Receita abençoada direto do nosso caderno de família, feita para recordar bons momentos.",
+    "Com sabor de tarde ensolarada no quintal da vó e conversa boa jogada fora.",
+    "Um segredo culinário guardado a sete chaves, agora compartilhado com muito amor.",
+    "Preparado com paciência, dedicação e pitadas generosas de afeto e nostalgia.",
+    "Aquece até os dias mais cinzentos trazendo lembranças doces do aconchego de casa.",
+    "Para lamber os dedos e repetir o prato sem qualquer pressa de terminar a refeição.",
+    "A receita perfeita para acompanhar um cafezinho passado na hora e um bom abraço.",
+    "Lembrança viva da infância, com cheirinho de bolo assando e riso solto na cozinha.",
+    "Feito devagarinho, respeitando o tempo de cada ingrediente, como a vida deve ser.",
+    "Uma delícia dourada que enche os olhos e alimenta a alma de quem a gente mais ama.",
+    "Aquela combinação simples e extraordinária que transforma qualquer dia comum em festa.",
+    "O verdadeiro prato do afeto: aconchegante, cheiroso, quentinho e perfeitamente saboroso.",
+    "Um pedacinho de céu em forma de comida, preparado com a máxima dedicação.",
+    "Receita rústica e cheia de personalidade, inspirada nos melhores banquetes de fazenda.",
+    "Aquele prato irresistível que faz todo mundo esquecer do resto do mundo na hora de comer.",
+    "Feito com ingredientes simples e comuns, mas com um toque mágico de puro carinho de vó.",
+    "Sabor nostálgico que atravessa gerações e sempre traz um sorriso sincero ao rosto.",
+    "Uma textura que derrete na boca e deixa um gostinho persistente de quero mais.",
+    "A clássica merenda de domingo, ideal para reatar elos e aproximar pessoas queridas.",
+    "Temperado com amor, risadas ao redor do fogão a lenha e lembranças inesquecíveis.",
+    "Uma mistura divina que desperta os melhores sentidos e acalma qualquer coração cansado.",
+    "Preparado do jeitinho clássico, sem pressa, com aquela dedicação que só quem ama tem.",
+    "Comida de verdade, feita para nutrir o corpo e adoçar a vida com delicadeza e simplicidade.",
+    "Aquele quitute especial que tem o poder de transformar uma reunião simples num banquete.",
+    "Receita simples e saborosa que passa de geração em geração enchendo a casa de alegria.",
+    "Perfeito para saborear com quem se ama, compartilhando histórias e sorrisos carinhosos.",
+    "A delícia que faltava para deixar a sua tarde de chá ainda mais aconchegante e feliz.",
+    "Aquela receita reconfortante que parece um abraço quentinho em forma de comida.",
+    "Uma explosão sutil de sabores rústicos que evoca as melhores memórias de infância.",
+    "Feito com muito afeto e aquele toque especial que só as grandes panelas de família têm.",
+    "Uma verdadeira joia da culinária afetiva, preparada com toda a paciência e dedicação.",
+    "O ponto perfeito entre a tradição e o amor, servido quentinho direto do forno.",
+    "Aquele gostinho de fogão de vó que acorda os sentidos e reaviva momentos felizes.",
+    "Para saborear devagar, apreciando cada colherada e o aroma que ficou no ar.",
+    "Receitinha abençoada que espanta qualquer tristeza com sua simplicidade irresistível.",
+    "O acompanhamento perfeito para aquela conversa comprida na mesa da cozinha.",
+    "Um clássico da nossa casa que nunca falha em arrancar elogios e sorrisos de todos.",
+    "Cheirinho de tempero fresco moído na hora e carinho que transborda em cada detalhe.",
+    "Uma refeição abençoada para compartilhar no domingo de sol com toda a família reunida.",
+    "A receita curinga do nosso coração, feita com dedicação máxima e amor sem medidas.",
+    "Gostinho de comida feita na roça, com ingredientes frescos e amor tradicional.",
+    "Feito com capricho e ternura, perfeito para quem aprecia a verdadeira essência do lar.",
+    "Comida que afaga a alma e resgata doces lembranças de tempos mais simples.",
+    "Aquele prato dourado e convidativo que faz as visitas se sentirem em casa imediatamente.",
+    "Receita de ouro para alegrar qualquer tarde regada a causos antigos e gargalhadas.",
+    "Feito para impressionar pelo afeto e simplicidade de uma cozinha genuinamente acolhedora.",
+    "Uma gostosura feita à moda antiga que preserva o sabor autêntico do nosso caderno de receitas."
+  ];
+
   // --- SALVAR NOVA RECEITA ---
   const handleSaveRecipe = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -1088,30 +1245,11 @@ export default function App() {
 
       const newCategoryToSave = newCategory || "Bolos e Broas";
 
-      // GERAR LEGENDA AUTOMÁTICA SILENCIOSA COM INTELIGÊNCIA ARTIFICIAL
-      let finalDescription = "";
-      try {
-        const genRes = await fetch("/api/generate-description", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            title: newTitle.trim(),
-            ingredients: ingredientsArray,
-            category: newCategoryToSave
-          })
-        });
-        const genData = await genRes.json();
-        if (genData.description) {
-          finalDescription = genData.description;
-        }
-      } catch (genErr) {
-        console.error("Erro na geração automática silenciosa de legenda:", genErr);
-      }
-
-      if (!finalDescription) {
-        finalDescription = "Receita caseira escrita com muito afeto no aplicativo de receitas.";
-      }
-
+      // Legenda personalizada opcional do usuário ou surpresa de vó imediata (100% livre de IA, instantâneo e otimizado)
+      const finalDescription = newDescription.trim()
+        ? newDescription.trim()
+        : PREMADE_DESCRIPTIONS[Math.floor(Math.random() * PREMADE_DESCRIPTIONS.length)];
+      
       const createdId = `custom-${Date.now()}`;
       const fallbackImages: { [key: string]: string } = {
         "Bolos e Broas": "https://images.unsplash.com/photo-1606313564200-e75d5e30476c?auto=format&fit=crop&q=80&w=600",
@@ -1121,8 +1259,11 @@ export default function App() {
         "Sobremesas e Doces": "https://images.unsplash.com/photo-1533782654613-826a072dd6f3?auto=format&fit=crop&q=80&w=600"
       };
 
+      const finalImageUrl = newImageUrl || fallbackImages[newCategoryToSave] || "https://images.unsplash.com/photo-1504674900247-0877df9cc836?auto=format&fit=crop&q=80&w=600";
+      const finalRating = Math.min(5, newRatingSetting || 5.0);
+
       if (currentUser && currentUser.uid) {
-        // Salvar no Firestore de forma persistente e segura
+        // Salvar no Firestore de forma persistente e segura INSTANTANEAMENTE
         const newRecipeObj: any = {
           title: newTitle.trim(),
           category: newCategoryToSave,
@@ -1131,8 +1272,8 @@ export default function App() {
           portions: `${newPortions.trim()} porções`,
           ingredients: ingredientsArray,
           instructions: instructionsArray,
-          imageUrl: newImageUrl || fallbackImages[newCategoryToSave] || "https://images.unsplash.com/photo-1504674900247-0877df9cc836?auto=format&fit=crop&q=80&w=600",
-          rating: Math.min(5, newRatingSetting || 5.0),
+          imageUrl: finalImageUrl,
+          rating: finalRating,
           ratingsCount: 1,
           authorId: currentUser.uid,
           authorName: finalAuthorName,
@@ -1144,13 +1285,12 @@ export default function App() {
 
         try {
           await setDoc(doc(db, "recipes", createdId), newRecipeObj);
-          
           setSelectedRecipe(null);
         } catch (fbErr) {
           handleFirestoreError(fbErr, OperationType.WRITE, `recipes/${createdId}`);
         }
       } else {
-        // Salvar local no localStorage para visitantes offline
+        // Salvar local no localStorage para visitantes offline INSTANTANEAMENTE
         const newRecipeObj: Recipe = {
           id: createdId,
           title: newTitle.trim(),
@@ -1161,8 +1301,8 @@ export default function App() {
           ingredients: ingredientsArray,
           instructions: instructionsArray,
           isPreset: false,
-          imageUrl: newImageUrl || fallbackImages[newCategoryToSave] || "https://images.unsplash.com/photo-1504674900247-0877df9cc836?auto=format&fit=crop&q=80&w=600",
-          rating: Math.min(5, newRatingSetting || 5.0),
+          imageUrl: finalImageUrl,
+          rating: finalRating,
           ratingsCount: 1,
           isPublic: newIsPublic,
           userEmail: undefined,
@@ -1388,7 +1528,7 @@ export default function App() {
 
                 {/* Opção de Publicar para todos ou Privar (Apenas se for receita do usuário) */}
                 {!selectedRecipe.isPreset && isRecipeOwner(selectedRecipe) && (
-                  <div className="bg-[#FAF6EE] border-4 border-[#3C3633] rounded-[24px] p-4.5 space-y-3 shadow-[4px_4px_0px_0px_rgba(60,54,51,1)] text-left animate-fadeIn">
+                  <div className="bg-[#FAF6EE] border-4 border-[#3C3633] rounded-[24px] p-4.5 space-y-3.5 shadow-[4px_4px_0px_0px_rgba(60,54,51,1)] text-left animate-fadeIn">
                     <div className="flex items-start gap-2.5">
                       <span className="text-2xl mt-0.5">
                         {selectedRecipe.isPublic !== false ? "🌍" : "🔒"}
@@ -1404,6 +1544,13 @@ export default function App() {
                         </p>
                       </div>
                     </div>
+
+                    {/* Alerta de feedback para a ação de privacidade e fotos */}
+                    {recipeDetailFeedback && (
+                      <div className="bg-white border-2 border-[#3C3633] rounded-xl p-2.5 text-[11px] font-black leading-tight text-[#3C3633] shadow-[2px_2px_0px_0px_rgba(60,54,51,1)]">
+                        {recipeDetailFeedback}
+                      </div>
+                    )}
                     
                     <div className="flex gap-2">
                       <button
@@ -1439,6 +1586,59 @@ export default function App() {
                       >
                         🌍 PUBLICAR GERAL
                       </button>
+                    </div>
+
+                    {/* SEÇÃO: Adicionar ou Alterar Foto do Prato */}
+                    <div className="border-t-2 border-dashed border-[#3C3633]/20 pt-3 space-y-2">
+                      <div className="flex justify-between items-center">
+                        <label className="text-[10px] font-extrabold text-[#3C3633] uppercase tracking-wider flex items-center gap-1">
+                          📸 Foto Real do seu Prato
+                        </label>
+                        {selectedRecipe.imageUrl && selectedRecipe.imageUrl.startsWith("data:image/") ? (
+                          <span className="text-[9px] bg-green-100 text-green-800 px-2 py-0.5 rounded-full font-black uppercase">
+                            ✓ Foto Carregada
+                          </span>
+                        ) : (
+                          <span className="text-[9px] bg-amber-100 text-amber-800 px-2 py-0.5 rounded-full font-black uppercase">
+                            ⚠️ Exclusivo para Pública
+                          </span>
+                        )}
+                      </div>
+                      
+                      <p className="text-[9.5px] text-gray-500 font-semibold leading-relaxed -mt-1">
+                        Para poder deixar sua receita como <strong>Pública (🌍)</strong> para todos os usuários do app, você precisa adicionar uma foto real do prato preparado!
+                      </p>
+
+                      <div className="relative border-4 border-dashed border-[#3C3633] rounded-xl bg-white p-3 text-center cursor-pointer hover:border-[#708238] transition-all flex flex-col items-center justify-center min-h-[70px] active:scale-[0.99]">
+                        <input 
+                          type="file" 
+                          accept="image/*" 
+                          onChange={(e) => handleUpdateRecipePhoto(selectedRecipe.id, e)}
+                          className="absolute inset-0 opacity-0 cursor-pointer z-20 w-full h-full"
+                          title="Atualizar ou Adicionar Foto do Prato"
+                        />
+                        {selectedRecipe.imageUrl && selectedRecipe.imageUrl.startsWith("data:image/") ? (
+                          <div className="flex items-center gap-2">
+                            <div className="w-[50px] h-[35px] rounded border-2 border-[#3C3633] overflow-hidden shadow">
+                              <img src={selectedRecipe.imageUrl} className="w-full h-full object-cover" alt="Foto atual" />
+                            </div>
+                            <div className="text-left">
+                              <p className="text-[10px] font-black text-green-800 leading-none">ALTERAR FOTO REAL</p>
+                              <p className="text-[8.5px] text-gray-400 font-bold">Toque para escolher outro arquivo</p>
+                            </div>
+                          </div>
+                        ) : (
+                          <div className="flex items-center gap-2 text-[#3C3633]">
+                            <Camera className="h-5 w-5 text-[#708238]" />
+                            <div className="text-left">
+                              <p className="text-[10px] font-black leading-none flex items-center justify-start gap-1">
+                                ENVIAR A FOTO DO PRATO
+                              </p>
+                              <p className="text-[8.5px] text-gray-400 font-bold">Tirar foto pelo celular ou carregar galeria</p>
+                            </div>
+                          </div>
+                        )}
+                      </div>
                     </div>
                   </div>
                 )}
@@ -2076,13 +2276,36 @@ export default function App() {
                       />
                     </div>
 
+                    {/* Campo: Mensagem / Legenda Especial (Opcional) */}
+                    <div className="space-y-1.5">
+                      <label className="text-sm font-black text-[#3C3633] block font-display tracking-wide uppercase" htmlFor="input-legenda">
+                        3b. Quer colocar uma mensagem ou legenda especial? <span className="text-[10px] text-gray-500 font-bold lowercase italic">(Opcional)</span>
+                      </label>
+                      <p className="text-[11px] text-[#3C3633]/85 font-bold -mt-0.5 mb-1 bg-[#F5F2ED] p-2 rounded-xl border border-[#3C3633]/20">
+                        ✍️ Se você não escrever nada, nós escolheremos uma linda mensagem surpresa com carinho de vó para o seu prato!
+                      </p>
+                      <textarea 
+                        id="input-legenda"
+                        rows={2}
+                        value={newDescription}
+                        onChange={(e) => setNewDescription(e.target.value)}
+                        placeholder="Escreva uma história gostosa do prato ou um recadinho especial (ex: Receita que aprendi com minha tia-avó no Natal)..."
+                        className="w-full p-4 bg-white border-4 border-[#3C3633] rounded-2xl text-base font-bold leading-relaxed focus:border-[#708238]"
+                      />
+                    </div>
+
                     {/* Campo: Enviar Foto Real */}
                     <div className="space-y-1.5 text-left">
-                      <label className="text-sm font-black text-[#3C3633] block font-display tracking-wide uppercase">
-                        4. Adicione uma foto real do seu prato
+                      <label className="text-sm font-black text-[#3C3633] block font-display tracking-wide uppercase flex justify-between items-center sm:flex-row flex-col gap-1">
+                        <span>4. Adicione uma foto real do seu prato</span>
+                        {newIsPublic && (
+                          <span className="text-[9px] bg-[#A0352A] text-white px-2 py-0.5 rounded-md font-black uppercase tracking-wider animate-pulse">
+                            Obrigatória para Pública
+                          </span>
+                        )}
                       </label>
                       <p className="text-[11px] text-[#3C3633]/85 font-bold -mt-0.5 mb-2 bg-[#F5F2ED] p-2 rounded-xl border border-[#3C3633]/20">
-                        📸 Clique abaixo para tirar uma foto na hora com o celular ou escolher de sua galeria! Nós reduzimos o tamanho dela automaticamente para caber.
+                        📸 Adicione uma linda foto do seu prato. Se marcar para publicar de forma Pública (🌍), de acordo com as regras da vovó cozinheira, a foto do prato é <strong>estritamente obrigatória</strong>!
                       </p>
                       
                       <div className="flex flex-col gap-3">
