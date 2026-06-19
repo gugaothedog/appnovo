@@ -88,6 +88,7 @@ export const filterBadWords = (text: string): string => {
 export default function App() {
   // --- ESTADOS DA APLICAÇÃO ---
   const [activeTab, setActiveTab] = useState<"ver_receitas" | "criar_receita" | "minhas_receitas">("ver_receitas");
+  const [editingRecipeId, setEditingRecipeId] = useState<string | null>(null);
   
   // Lista de receitas combinando padrão (PRESET) e salvas no localStorage
   const [recipes, setRecipes] = useState<Recipe[]>(PRESET_RECIPES);
@@ -506,6 +507,82 @@ export default function App() {
     setCurrentStepIndex(0);
     setRecipeDetailFeedback(null);
   }, [selectedRecipe, activeTab, selectedCategory]);
+
+  // --- HISTÓRICO COM BOTÃO VOLTAR DO CELULAR (INTERCEPTAÇÃO POPSTATE) ---
+  // Iniciar estado na história para a página inicial com carinho de vó
+  useEffect(() => {
+    const initialState = {
+      activeTab: "ver_receitas",
+      selectedCategoryId: null,
+      selectedRecipeId: null,
+      editingRecipeId: null,
+      showAdminSystemPanel: false,
+      isAuthModalOpen: false,
+      receitasCasaState: true
+    };
+    if (!window.history.state || !window.history.state.receitasCasaState) {
+      window.history.replaceState(initialState, "");
+    }
+  }, []);
+
+  // Publicar alterações ao navegar para um novo elemento/tela (Push State)
+  useEffect(() => {
+    const currentState = {
+      activeTab,
+      selectedCategoryId: selectedCategory || null,
+      selectedRecipeId: selectedRecipe ? selectedRecipe.id : null,
+      editingRecipeId,
+      showAdminSystemPanel,
+      isAuthModalOpen,
+      receitasCasaState: true
+    };
+
+    const browserState = window.history.state;
+    // Se o estado atual do navegador for diferente do nosso estado, nós enviamos pushState para empilhar no histórico
+    if (browserState && browserState.receitasCasaState) {
+      const isDifferent = 
+        browserState.activeTab !== currentState.activeTab ||
+        browserState.selectedCategoryId !== currentState.selectedCategoryId ||
+        browserState.selectedRecipeId !== currentState.selectedRecipeId ||
+        browserState.editingRecipeId !== currentState.editingRecipeId ||
+        browserState.showAdminSystemPanel !== currentState.showAdminSystemPanel ||
+        browserState.isAuthModalOpen !== currentState.isAuthModalOpen;
+
+      if (isDifferent) {
+        window.history.pushState(currentState, "");
+      }
+    } else {
+      window.history.pushState(currentState, "");
+    }
+  }, [activeTab, selectedCategory, selectedRecipe, editingRecipeId, showAdminSystemPanel, isAuthModalOpen]);
+
+  // Escutar o botão de voltar do celular/navegador (POPSTATE)
+  useEffect(() => {
+    const handlePopState = (event: PopStateEvent) => {
+      const state = event.state;
+      if (state && state.receitasCasaState) {
+        // Atualizar os estados internos do React baseados no histórico recuperado da pilha
+        setActiveTab(state.activeTab);
+        setSelectedCategory(state.selectedCategoryId);
+        setEditingRecipeId(state.editingRecipeId);
+        setShowAdminSystemPanel(state.showAdminSystemPanel);
+        setIsAuthModalOpen(!!state.isAuthModalOpen);
+        
+        if (state.selectedRecipeId) {
+          // Procurar receita selecionada para restaurá-la na tela do usuário
+          const found = recipes.find(r => r.id === state.selectedRecipeId);
+          setSelectedRecipe(found || null);
+        } else {
+          setSelectedRecipe(null);
+        }
+      }
+    };
+
+    window.addEventListener("popstate", handlePopState);
+    return () => {
+      window.removeEventListener("popstate", handlePopState);
+    };
+  }, [recipes]);
 
   // --- FAVORITAR RECEITA ---
   const handleToggleFavorite = async (recipeId: string, event?: React.MouseEvent) => {
@@ -1189,7 +1266,34 @@ export default function App() {
     "Uma gostosura feita à moda antiga que preserva o sabor autêntico do nosso caderno de receitas."
   ];
 
-  // --- SALVAR NOVA RECEITA ---
+  // --- INICIAR EDIÇÃO DE UMA RECEITA EXISTENTE ---
+  const handleStartEditRecipe = (recipe: Recipe) => {
+    setEditingRecipeId(recipe.id);
+    setNewTitle(recipe.title);
+    setNewCategory(recipe.category);
+    setNewPrepTime(recipe.prepTime);
+    
+    // extrair porções
+    if (recipe.portions) {
+      const parts = recipe.portions.split(" ");
+      setNewPortions(parts[0] || "");
+    } else {
+      setNewPortions("");
+    }
+    
+    setNewIngredientsText(recipe.ingredients.join("\n"));
+    setNewInstructionsText(recipe.instructions.join("\n"));
+    setNewDescription(recipe.description || "");
+    setNewImageUrl(recipe.imageUrl || "");
+    setNewIsPublic(recipe.isPublic !== false);
+    
+    // Mudar de aba para "criar_receita"
+    setActiveTab("criar_receita");
+    // Desmarcar receita selecionada
+    setSelectedRecipe(null);
+  };
+
+  // --- SALVAR OU ATUALIZAR RECEITA ---
   const handleSaveRecipe = async (e: React.FormEvent) => {
     e.preventDefault();
     if (isSaving) return;
@@ -1262,52 +1366,66 @@ export default function App() {
       const finalImageUrl = newImageUrl || fallbackImages[newCategoryToSave] || "https://images.unsplash.com/photo-1504674900247-0877df9cc836?auto=format&fit=crop&q=80&w=600";
       const finalRating = Math.min(5, newRatingSetting || 5.0);
 
-      if (currentUser && currentUser.uid) {
+      const existingRecipe = recipes.find(r => r.id === editingRecipeId);
+      const isLocalStorageOnly = existingRecipe ? (!existingRecipe.authorId && !existingRecipe.userEmail) : true;
+      const isEditing = !!editingRecipeId;
+      const savedRecipeId = isEditing && editingRecipeId ? editingRecipeId : createdId;
+
+      if (currentUser && currentUser.uid && !isLocalStorageOnly) {
         // Salvar no Firestore de forma persistente e segura INSTANTANEAMENTE
-        const newRecipeObj: any = {
+        const recipeObjToSave: any = {
           title: newTitle.trim(),
           category: newCategoryToSave,
           description: finalDescription,
           prepTime: newPrepTime.trim(),
-          portions: `${newPortions.trim()} porções`,
+          portions: newPortions.trim().endsWith(" porções") ? newPortions.trim() : `${newPortions.trim()} porções`,
           ingredients: ingredientsArray,
           instructions: instructionsArray,
           imageUrl: finalImageUrl,
-          rating: finalRating,
-          ratingsCount: 1,
-          authorId: currentUser.uid,
-          authorName: finalAuthorName,
+          authorId: existingRecipe?.authorId || currentUser.uid,
+          authorName: existingRecipe?.authorName || finalAuthorName,
           isPublic: newIsPublic,
-          userEmail: currentUser.email,
-          createdAt: serverTimestamp(),
+          userEmail: existingRecipe?.userEmail || currentUser.email,
           updatedAt: serverTimestamp()
         };
 
+        if (!isEditing) {
+          recipeObjToSave.createdAt = serverTimestamp();
+          recipeObjToSave.rating = finalRating;
+          recipeObjToSave.ratingsCount = 1;
+        } else {
+          recipeObjToSave.rating = existingRecipe?.rating || finalRating;
+          recipeObjToSave.ratingsCount = existingRecipe?.ratingsCount || 1;
+          if (existingRecipe?.createdAt) {
+            recipeObjToSave.createdAt = existingRecipe.createdAt;
+          }
+        }
+
         try {
-          await setDoc(doc(db, "recipes", createdId), newRecipeObj);
+          await setDoc(doc(db, "recipes", savedRecipeId), recipeObjToSave);
           setSelectedRecipe(null);
         } catch (fbErr) {
-          handleFirestoreError(fbErr, OperationType.WRITE, `recipes/${createdId}`);
+          handleFirestoreError(fbErr, OperationType.WRITE, `recipes/${savedRecipeId}`);
         }
       } else {
         // Salvar local no localStorage para visitantes offline INSTANTANEAMENTE
-        const newRecipeObj: Recipe = {
-          id: createdId,
+        const localRecipeObj: Recipe = {
+          id: savedRecipeId,
           title: newTitle.trim(),
           category: newCategoryToSave,
           description: finalDescription,
           prepTime: newPrepTime.trim(),
-          portions: `${newPortions.trim()} porções`,
+          portions: newPortions.trim().endsWith(" porções") ? newPortions.trim() : `${newPortions.trim()} porções`,
           ingredients: ingredientsArray,
           instructions: instructionsArray,
           isPreset: false,
           imageUrl: finalImageUrl,
-          rating: finalRating,
-          ratingsCount: 1,
+          rating: isEditing && existingRecipe ? (existingRecipe.rating || 5) : finalRating,
+          ratingsCount: isEditing && existingRecipe ? (existingRecipe.ratingsCount || 1) : 1,
           isPublic: newIsPublic,
-          userEmail: undefined,
-          authorId: undefined,
-          authorName: finalAuthorName
+          userEmail: existingRecipe?.userEmail || undefined,
+          authorId: existingRecipe?.authorId || undefined,
+          authorName: existingRecipe?.authorName || finalAuthorName
         };
 
         const savedCustom = localStorage.getItem("receitas_casa_custom");
@@ -1323,7 +1441,12 @@ export default function App() {
           }
         }
         
-        let updatedCustomList = [newRecipeObj, ...currentCustomList];
+        let updatedCustomList: Recipe[] = [];
+        if (isEditing) {
+          updatedCustomList = currentCustomList.map(item => item.id === savedRecipeId ? localRecipeObj : item);
+        } else {
+          updatedCustomList = [localRecipeObj, ...currentCustomList];
+        }
         
         try {
           localStorage.setItem("receitas_casa_custom", JSON.stringify(updatedCustomList));
@@ -1332,12 +1455,16 @@ export default function App() {
           if (newImageUrl) {
             setFormFeedback("A receita foi salva! Mas por ser uma foto muito pesada, guardamos ela usando a imagem padrão para poupar espaço.");
             const withoutImageObj = {
-              ...newRecipeObj,
+              ...localRecipeObj,
               imageUrl: fallbackImages[newCategoryToSave] || "https://images.unsplash.com/photo-1504674900247-0877df9cc836?auto=format&fit=crop&q=80&w=600"
             };
-            updatedCustomList = [withoutImageObj, ...currentCustomList];
+            if (isEditing) {
+              updatedCustomList = currentCustomList.map(item => item.id === savedRecipeId ? withoutImageObj : item);
+            } else {
+              updatedCustomList = [withoutImageObj, ...currentCustomList];
+            }
             localStorage.setItem("receitas_casa_custom", JSON.stringify(updatedCustomList));
-            newRecipeObj.imageUrl = withoutImageObj.imageUrl;
+            localRecipeObj.imageUrl = withoutImageObj.imageUrl;
           } else {
             throw quotaError;
           }
@@ -1358,6 +1485,7 @@ export default function App() {
       setNewIsPublic(true);
       setNewRatingSetting(5);
       setFormFeedback(null);
+      setEditingRecipeId(null);
 
       // Feedback de sucesso visual e ir direto para o caderno "Minhas Receitas"
       setActiveTab("minhas_receitas");
@@ -1502,8 +1630,12 @@ export default function App() {
               <button 
                 id="btn-voltar-detalhe"
                 onClick={() => {
-                  setSelectedRecipe(null);
-                  setCurrentStepIndex(0);
+                  if (window.history.state && window.history.state.selectedRecipeId === selectedRecipe?.id) {
+                    window.history.back();
+                  } else {
+                    setSelectedRecipe(null);
+                    setCurrentStepIndex(0);
+                  }
                 }}
                 className="w-full flex items-center justify-center gap-3 bg-white border-4 border-[#3C3633] hover:bg-[#F5F2ED] active:bg-[#3C3633] active:text-white py-3.5 px-4 rounded-[24px] shadow-[4px_4px_0px_0px_rgba(60,54,51,1)] text-[#3C3633] font-black transition-all active:translate-x-0.5 active:translate-y-0.5 active:shadow-none text-lg"
               >
@@ -1999,13 +2131,22 @@ export default function App() {
                   </div>
                 </div>
 
-                {/* Excluir Receita (se for do usuário ou administrador) */}
+                {/* Excluir / Editar Receita (se for do usuário ou administrador) */}
                 {selectedRecipe && (
-                  <div className="pt-2 border-t-2 border-[#F5F2ED] flex justify-end">
+                  <div className="pt-3 border-t-2 border-[#F5F2ED] flex justify-between items-center gap-2">
+                    {!selectedRecipe.isPreset && isRecipeOwner(selectedRecipe) && (
+                      <button
+                        id={`btn-edit-recipe-${selectedRecipe.id}`}
+                        onClick={() => handleStartEditRecipe(selectedRecipe)}
+                        className="py-2.5 px-4 bg-[#FFDE4D] border-2 border-[#3C3633] hover:bg-[#FFD41A] text-[#3C3633] rounded-xl text-xs font-black tracking-wide flex items-center justify-center gap-1.5 active:scale-95 transition-transform cursor-pointer shadow-[2px_2px_0px_0px_rgba(60,54,51,1)]"
+                      >
+                        ✏️ EDITAR RECEITA
+                      </button>
+                    )}
                     <button
                       id={`btn-delete-recipe-${selectedRecipe.id}`}
                       onClick={(e) => handleDeleteCustomRecipe(selectedRecipe.id, e)}
-                      className="py-2.5 px-4 bg-[#FFEBE6] border-2 border-[#FFA3A3] hover:bg-red-50 text-red-800 rounded-xl text-xs font-black tracking-wide flex items-center gap-1.5 active:scale-95 transition-transform cursor-pointer"
+                      className="py-2.5 px-4 bg-[#FFEBE6] border-2 border-[#FFA3A3] hover:bg-red-50 text-red-800 rounded-xl text-xs font-black tracking-wide flex items-center justify-center gap-1.5 active:scale-95 transition-transform cursor-pointer"
                     >
                       <Trash2 className="h-4 w-4" />
                       {selectedRecipe.isPreset ? "APAGAR RECEITA (FÁBRICA)" : "APAGAR ESTA RECEITA"}
@@ -2168,16 +2309,38 @@ export default function App() {
               {/* TELA 2: CRIAR RECEITA */}
               {activeTab === "criar_receita" && (
                 <div className="space-y-4" id="create-recipe-tab">
-                  <div className="bg-[#708238]/10 border-4 border-[#708238] p-5 rounded-[28px] space-y-1.5 shadow-[4px_4px_0px_0px_rgba(112,130,56,0.15)]">
+                  <div className="bg-[#708238]/10 border-4 border-[#708238] p-5 rounded-[28px] space-y-1.5 shadow-[4px_4px_0px_0px_rgba(112,130,56,0.15)] animate-fadeIn">
                     <span className="text-xs font-black uppercase bg-white text-[#708238] border border-[#708238] px-3 py-1 rounded-full inline-block">
-                      PASSO FÁCIL
+                      {editingRecipeId ? "MODO DE EDIÇÃO ✏️" : "PASSO FÁCIL"}
                     </span>
                     <h2 className="text-[19px] font-display font-black text-[#3C3633] uppercase">
-                      Criar Receita de Família
+                      {editingRecipeId ? "Editar Receita de Família" : "Criar Receita de Família"}
                     </h2>
                     <p className="text-xs text-[#3C3633] font-bold leading-relaxed">
-                      Preencha os campos abaixo com calma. Não se preocupe com erros, escreva do seu jeito!
+                      {editingRecipeId 
+                        ? "Modifique os campos que você deseja atualizar. Quando terminar, basta clicar em salvar!" 
+                        : "Preencha os campos abaixo com calma. Não se preocupe com erros, escreva do seu jeito!"}
                     </p>
+                    {editingRecipeId && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setEditingRecipeId(null);
+                          setNewTitle("");
+                          setNewCategory("Bolos e Broas");
+                          setNewPrepTime("");
+                          setNewPortions("");
+                          setNewIngredientsText("");
+                          setNewInstructionsText("");
+                          setNewDescription("");
+                          setNewImageUrl("");
+                          setActiveTab("minhas_receitas");
+                        }}
+                        className="mt-2 text-left px-3 py-1.5 bg-[#FFEBE6] border-2 border-[#FFA3A3] text-red-800 hover:bg-red-50 rounded-xl text-[10px] font-black flex items-center gap-1 active:scale-95 transition-transform cursor-pointer"
+                      >
+                        ❌ CANCELAR EDIÇÃO E VOLTAR
+                      </button>
+                    )}
                   </div>
 
                   {formFeedback && (
@@ -2516,14 +2679,30 @@ export default function App() {
                               </div>
                               
                               <div className="flex gap-1.5 items-center">
+                                {/* Botão para editar diretamente caso seja dono da receita */}
+                                {(!recipe.isPreset && isRecipeOwner(recipe)) && (
+                                  <button
+                                    id={`btn-inline-edit-${recipe.id}`}
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      handleStartEditRecipe(recipe);
+                                    }}
+                                    className="py-1 px-2.5 bg-[#FFDE4D] border-2 border-[#3C3633] text-[#3C3633] hover:bg-[#FFD41A] rounded-lg cursor-pointer text-[10px] font-black flex items-center justify-center gap-1 active:scale-95 transition-transform shadow-[1px_1px_0px_0px_rgba(60,54,51,1)] shrink-0 h-7"
+                                    title="Editar Receita"
+                                  >
+                                    ✏️
+                                    <span>Editar</span>
+                                  </button>
+                                )}
+
                                 {/* Botão para deletar/remover diretamente */}
                                 <button
                                   id={`btn-inline-delete-${recipe.id}`}
                                   onClick={(e) => handleDeleteCustomRecipe(recipe.id, e)}
-                                  className="py-2 px-3.5 bg-[#FFEBE6] border-2 border-[#FFA3A3] text-red-800 hover:bg-red-50 rounded-xl cursor-pointer text-xs font-black flex items-center justify-center gap-1 active:scale-95 transition-transform"
+                                  className="py-1 px-2 bg-[#FFEBE6] border-2 border-[#FFA3A3] text-red-800 hover:bg-red-50 rounded-lg cursor-pointer text-[10px] font-black flex items-center justify-center gap-1 active:scale-95 transition-transform shrink-0 h-7"
                                   title="Remover do Caderno"
                                 >
-                                  <Trash2 className="h-4 w-4 text-red-600 shrink-0" />
+                                  <Trash2 className="h-3.5 w-3.5 text-red-600 shrink-0" />
                                   <span>Apagar</span>
                                 </button>
                                 <span className="text-xs font-black text-white bg-[#708238] border-2 border-[#3C3633] px-3.5 py-1.5 rounded-xl shadow-[2px_2px_0px_0px_rgba(60,54,51,1)]">
@@ -2574,6 +2753,17 @@ export default function App() {
                 setSelectedRecipe(null);
                 setSelectedCategory(null);
                 setFormFeedback(null);
+                if (editingRecipeId) {
+                  setEditingRecipeId(null);
+                  setNewTitle("");
+                  setNewCategory("Bolos e Broas");
+                  setNewPrepTime("");
+                  setNewPortions("");
+                  setNewIngredientsText("");
+                  setNewInstructionsText("");
+                  setNewDescription("");
+                  setNewImageUrl("");
+                }
               }}
               className="w-[72px] h-[72px] rounded-full bg-[#708238] border-3 border-[#FDFBF7] shadow-xl hover:bg-[#5C6E2C] active:scale-90 transition-transform flex flex-col items-center justify-center text-white ring-4 ring-[#708238] cursor-pointer"
               title="Adicionar ou Escrever Nova Receita"
